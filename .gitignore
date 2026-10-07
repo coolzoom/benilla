@@ -24,6 +24,12 @@
 # client's account guard read it): WOW_USER=, WOW_PASS=, WOW_CHAR=, one per line. A credential.
 /.probe-identity
 
+# Paths and login saved by dev.sh. A credential when an account is stored.
+/.benilla.local
+
+# android.sh's toolchain (JDK, Android SDK and NDK), keystore and APK.
+/_work/
+
 # Profiling output: `--features bevy/trace_chrome` drops a multi-GB flame chart in the cwd, which
 # otherwise leaves the checkout "dirty".
 trace-*.json
@@ -41,3 +47,4 @@ __pycache__/
 # The vanilla addon corpus the UI engine's real-addon tests read (third-party content): a symlink
 # beside `WoW`, or `BENILLA_ADDON_CORPUS`.
 /wow-addons-vanilla
+_setup.log

@@ -19,8 +19,6 @@ trace_chrome = ["bevy/trace_chrome"]
 
 [dependencies]
 anyhow.workspace = true
-# The EditBox clipboard, on the main thread as NSPasteboard requires; bevy_egui's 3.x.
-arboard = "3"
 benilla-ui = { path = "../benilla-ui" }
 bevy.workspace = true
 wgpu.workspace = true
@@ -66,6 +64,11 @@ rtrb = "0.3"
 mint = "0.5"
 # The gossip greeting's weighted draw, re-rolled per open as in the reference.
 rand = "0.8"
+
+# The EditBox clipboard, on the main thread as NSPasteboard requires; bevy_egui's 3.x. Android has
+# no backend in it.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+arboard = "3"
 
 # Wayland clipboard over the standard `wl_data_device`; arboard's speaks `wlr-data-control`,
 # which GNOME does not implement.
