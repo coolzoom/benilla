@@ -17,7 +17,7 @@
 #   ANDROID_REVERSE=0                   skip `adb reverse` of the server ports
 #
 # Everything downloaded lives in _work/ (gitignored). The game data is the player's own and is
-# pushed to the app's external files folder, never packed into the APK.
+# copied into the app's internal files folder through `run-as`, never packed into the APK.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")" && pwd)"
@@ -36,7 +36,9 @@ NDK_VERSION=27.2.12479018
 NDK_RELEASE=r27c
 CMDLINE_TOOLS=13114758
 PROFILE="${ANDROID_PROFILE:-release}"
-DEVICE_DIR="/sdcard/Android/data/$PKG/files"
+# The app's internal files folder (benilla-android's `android_main`), written through `run-as`.
+DEVICE_DIR="/data/user/0/$PKG/files"
+STAGE="/data/local/tmp/benilla-stage"
 
 export ANDROID_HOME="${ANDROID_HOME:-$work/android-sdk}"
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
@@ -360,6 +362,12 @@ write_device_env() {
         [ -n "${WOW_PASS:-}" ] && echo "WOW_PASS=$WOW_PASS"
         [ -n "${WOW_CHAR:-}" ] && echo "WOW_CHAR=$WOW_CHAR"
         echo "WOW_NOSOUND=${WOW_NOSOUND:-}"
+        # An emulator's goldfish Vulkan encoder hangs under concurrent calls (benilla_world::boot).
+        if adb_ shell ls /system/lib64/libvulkan_enc.so >/dev/null 2>&1; then
+            echo "WOW_GPU_SERIAL=1"
+        fi
+        # wgpu's backend override (`vulkan`, `gl`), passed through when set here.
+        [ -n "${WGPU_BACKEND:-}" ] && echo "WGPU_BACKEND=$WGPU_BACKEND"
     } >"$f"
     chmod 600 "$f"
 }
@@ -387,30 +395,39 @@ install_apk() {
     [ -f "$apk" ] || die "没有 ${apk}（先运行 ./android.sh package）"
     say "adb install $apk"
     adb_ install -r -d "$apk"
-    # The app's external files folder; created by the install for adb to write into.
-    adb_ shell mkdir -p "$DEVICE_DIR/benilla-config"
     write_device_env "$work/benilla.env"
-    adb_ push "$work/benilla.env" "$DEVICE_DIR/benilla.env" >/dev/null
+    stage_in "$work/benilla.env" "$DEVICE_DIR/benilla.env"
     say "已写入 $DEVICE_DIR/benilla.env（服务器 $(device_host)）"
-    fix_owner
     reverse_ports
 }
 
-# A root adb (MuMu and other emulators) writes files as 0:0 that the app cannot open; hand the
-# folder to the owner of `files/` itself. A device's non-root adb goes through FUSE, which owns
-# them right already.
-fix_owner() {
-    [ "$(adb_ shell id -u | tr -d '\r')" = 0 ] || return 0
-    local owner
-    owner="$(adb_ shell stat -c %u:%g "$DEVICE_DIR" | tr -d '\r')"
-    adb_ shell chown -R "$owner" "$DEVICE_DIR"
-    adb_ shell chmod -R ug+rwX "$DEVICE_DIR"
-    say "chown -R $owner $DEVICE_DIR（root adb）"
+# A shell command as the app itself (`android:debuggable`), so what it writes is the app's own.
+as_app() {
+    adb_ shell run-as "$PKG" sh -c "'$1'"
+}
+
+# Push `src` (a file, or a folder's contents) to `dest` in the app's folder: adb pushes into the
+# shell's staging folder, and the app copies it in.
+stage_in() {
+    local src="$1" dest="$2"
+    adb_ shell rm -rf "$STAGE" && adb_ shell mkdir -p "$STAGE"
+    if [ -d "$src" ]; then
+        adb_ push "$src/." "$STAGE/"
+    else
+        adb_ push "$src" "$STAGE/" >/dev/null
+    fi
+    adb_ shell chmod -R a+rX "$STAGE"
+    if [ -d "$src" ]; then
+        as_app "mkdir -p $dest && cp -R $STAGE/. $dest/"
+    else
+        as_app "mkdir -p $(dirname "$dest") && cp $STAGE/$(basename "$src") $dest"
+    fi
+    adb_ shell rm -rf "$STAGE"
 }
 
 # A vanilla Data folder on the device, by the same test as dev.sh's.
 device_has_data() {
-    adb_ shell "ls $DEVICE_DIR/WoW/Data" 2>/dev/null | tr -d '\r' | grep -qiE '^(patch|terrain)\.mpq$'
+    as_app "ls $DEVICE_DIR/WoW/Data" 2>/dev/null | tr -d '\r' | grep -qiE '^(patch|terrain)\.mpq$'
 }
 
 local_data_dir() {
@@ -428,9 +445,7 @@ push_data() {
     local src
     src="$(local_data_dir)"
     say "推送 $src -> $DEVICE_DIR/WoW/Data（$(du -sh "$src" | cut -f1)，需要一些时间）"
-    adb_ shell mkdir -p "$DEVICE_DIR/WoW"
-    adb_ push --sync "$src/." "$DEVICE_DIR/WoW/Data/"
-    fix_owner
+    stage_in "$src" "$DEVICE_DIR/WoW/Data"
     say "游戏数据已推送"
 }
 

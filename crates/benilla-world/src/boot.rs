@@ -6,9 +6,73 @@ use bevy::prelude::*;
 
 use crate::thread_qos;
 
+/// `WOW_GPU_SERIAL=1`: one thread at a time in the GPU driver, for an emulated GPU (MuMu's
+/// goldfish Vulkan encoder) that hangs when two threads call it at once. Pipelines compile on the
+/// render thread, rendering is not pipelined, the compute pool has one worker, and the app runs
+/// `Render` single-threaded.
+pub fn gpu_serial() -> bool {
+    std::env::var("WOW_GPU_SERIAL").as_deref() == Ok("1")
+}
+
+/// The device's own limits but four storage textures per stage, under which bevy skips
+/// `ScreenSpaceAmbientOcclusionPlugin` (it needs five). benilla draws no SSAO, but the plugin
+/// compiles its compute pipelines at startup, and an emulated GLES rejects their
+/// `textureGatherOffset`. Bevy takes the minimum of each `max_*` field and the maximum of each
+/// `min_*`, so every other field is left unbounded.
+fn emulator_limits() -> bevy::render::settings::WgpuLimits {
+    const M: u32 = u32::MAX;
+    bevy::render::settings::WgpuLimits {
+        max_storage_textures_per_shader_stage: 4,
+        max_texture_dimension_1d: M,
+        max_texture_dimension_2d: M,
+        max_texture_dimension_3d: M,
+        max_texture_array_layers: M,
+        max_bind_groups: M,
+        max_bindings_per_bind_group: M,
+        max_dynamic_uniform_buffers_per_pipeline_layout: M,
+        max_dynamic_storage_buffers_per_pipeline_layout: M,
+        max_sampled_textures_per_shader_stage: M,
+        max_samplers_per_shader_stage: M,
+        max_storage_buffers_per_shader_stage: M,
+        max_uniform_buffers_per_shader_stage: M,
+        max_binding_array_elements_per_shader_stage: M,
+        max_binding_array_sampler_elements_per_shader_stage: M,
+        max_uniform_buffer_binding_size: M,
+        max_storage_buffer_binding_size: M,
+        max_vertex_buffers: M,
+        max_buffer_size: u64::MAX,
+        max_vertex_attributes: M,
+        max_vertex_buffer_array_stride: M,
+        min_uniform_buffer_offset_alignment: 0,
+        min_storage_buffer_offset_alignment: 0,
+        max_inter_stage_shader_components: M,
+        max_color_attachments: M,
+        max_color_attachment_bytes_per_sample: M,
+        max_compute_workgroup_storage_size: M,
+        max_compute_invocations_per_workgroup: M,
+        max_compute_workgroup_size_x: M,
+        max_compute_workgroup_size_y: M,
+        max_compute_workgroup_size_z: M,
+        max_compute_workgroups_per_dimension: M,
+        min_subgroup_size: 0,
+        max_subgroup_size: M,
+        max_push_constant_size: M,
+        max_non_sampler_bindings: M,
+        max_task_workgroup_total_count: M,
+        max_task_workgroups_per_dimension: M,
+        max_mesh_output_layers: M,
+        max_mesh_multiview_count: M,
+        max_blas_primitive_count: M,
+        max_blas_geometry_count: M,
+        max_tlas_instance_count: M,
+        max_acceleration_structures_per_shader_stage: M,
+    }
+}
+
 /// `DefaultPlugins` with benilla's engine tuning applied, around the caller's primary window.
 pub fn tuned_default_plugins(primary_window: Window) -> PluginGroupBuilder {
-    DefaultPlugins
+    let serial = gpu_serial();
+    let plugins = DefaultPlugins
         .set(WindowPlugin {
             primary_window: Some(primary_window),
             ..default()
@@ -48,14 +112,24 @@ pub fn tuned_default_plugins(primary_window: Window) -> PluginGroupBuilder {
                     })),
                     // `WOW_THREADS=1` serialises the frame's systems, a diagnostic: a defect that
                     // survives it is not a race between two systems.
-                    max_threads: match std::env::var("WOW_THREADS").ok().as_deref() {
-                        Some("1") => 1,
-                        _ => TaskPoolOptions::default().compute.max_threads,
+                    max_threads: if serial || std::env::var("WOW_THREADS").as_deref() == Ok("1") {
+                        1
+                    } else {
+                        TaskPoolOptions::default().compute.max_threads
                     },
                     ..TaskPoolOptions::default().compute
                 },
                 ..default()
             },
+        })
+        .set(bevy::render::RenderPlugin {
+            render_creation: bevy::render::settings::WgpuSettings {
+                constrained_limits: serial.then(emulator_limits),
+                ..default()
+            }
+            .into(),
+            synchronous_pipeline_compilation: serial,
+            ..default()
         })
         // Sound is kira behind our own mixer; `bevy_audio` is off by feature (workspace
         // `Cargo.toml`). Kept though they look idle: gizmos (bowstring, fishing line), sprites (the
@@ -68,5 +142,10 @@ pub fn tuned_default_plugins(primary_window: Window) -> PluginGroupBuilder {
         // No bevy AA: no Fxaa/TAA/SMAA/CAS component anywhere (MSAA is core render, unaffected).
         .disable::<bevy::anti_alias::AntiAliasPlugin>()
         // No gamepad input; 1.12's bindings are keyboard/mouse.
-        .disable::<bevy::gilrs::GilrsPlugin>()
+        .disable::<bevy::gilrs::GilrsPlugin>();
+    if serial {
+        plugins.disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>()
+    } else {
+        plugins
+    }
 }

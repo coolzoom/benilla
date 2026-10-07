@@ -1,10 +1,11 @@
 //! The Android launcher: NativeActivity loads this library and calls [`android_main`], which
-//! points the install and the state folder at the app's external files folder and runs
+//! points the install and the state folder at the app's internal files folder and runs
 //! `benilla_app`. An app gets no environment from adb, so `benilla.env` in that folder carries the
-//! variables a desktop run takes from the shell. The folder, as `android.sh` fills it:
+//! variables a desktop run takes from the shell. `android.sh` fills it through `run-as`, so every
+//! file is the app's own; files adb writes into the external folder are not, on an emulator.
 //!
 //! ```text
-//! /sdcard/Android/data/org.benilla.client/files/
+//! /data/user/0/org.benilla.client/files/
 //!   benilla.env       WOW_HOST=…, WOW_USER=…, one KEY=VALUE per line
 //!   WoW/Data/         the player's own 1.12.1 Data, read-only
 //!   benilla-config/   benilla's local state
@@ -21,8 +22,8 @@ use bevy::android::android_activity::AndroidApp;
 fn android_main(app: AndroidApp) {
     logcat::redirect_stdio();
     let files = app
-        .external_data_path()
-        .or_else(|| app.internal_data_path());
+        .internal_data_path()
+        .or_else(|| app.external_data_path());
     let _ = bevy::android::ANDROID_APP.set(app);
     match files {
         Some(dir) => configure(&dir),

@@ -441,6 +441,15 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
             eprintln!("executor: no render app — ExtractSchedule flip NOT applied");
         }
     }
+    // Unpipelined, `Render` runs on the main thread, so the single-threaded executor serves it.
+    if benilla_world::boot::gpu_serial() {
+        if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
+            render_app.edit_schedule(bevy::render::Render, |s| {
+                s.set_executor_kind(bevy::ecs::schedule::ExecutorKind::SingleThreaded);
+            });
+            println!("executor: Render -> single-threaded, unpipelined (WOW_GPU_SERIAL=1)");
+        }
+    }
 
     // A crate on top of benilla adds its plugins here ([`run_with`]).
     if let Some(extend) = extend {
