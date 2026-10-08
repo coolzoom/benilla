@@ -65,9 +65,17 @@ const WORD_MATTE: u32 = 1 << 28;
 // flags.z && !flags.x`: SH-probe light from its record slot, interior fog, no live point lights.
 
 /// On unless `WOW_STATIC_GX=0`; read once, and the plugin registers nothing when off.
+///
+/// Off on the GL backend (`WGPU_BACKEND=gl`): its pool fills array layers with
+/// `copy_texture_to_texture`, which GL runs through a framebuffer and `glCopyTexSubImage`, and a
+/// BC-compressed BLP can be neither attached nor copied, so every layer stays undefined and samples
+/// black.
 pub fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("WOW_STATIC_GX").as_deref() != Ok("0"))
+    *ON.get_or_init(|| {
+        let gl = std::env::var("WGPU_BACKEND").is_ok_and(|b| b.eq_ignore_ascii_case("gl"));
+        std::env::var("WOW_STATIC_GX").as_deref() != Ok("0") && !gl
+    })
 }
 
 /// `WOW_WMO_BIAS=0`: the authored batch-order nudge bakes as zero, as in `model_material`.
