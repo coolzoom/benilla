@@ -72,6 +72,9 @@ fn harness_with_slider_table(
     // The app's post-load pass: `BuffFrame_OnLoad` never pitches the buff rows, and the stock arm
     // that does waits for `VARIABLES_LOADED` (`UIOptionsFrame.lua:206`).
     super::manifest::apply_buff_durations(&s).unwrap();
+    // The rows' tips take `GameTooltip_SetDefaultAnchor`, which reads the bag offsets
+    // `ContainerFrame.lua:11-12` declares; the stock 0 and 70, as no bag is open.
+    s.run("CONTAINER_OFFSET_X = 0 CONTAINER_OFFSET_Y = 70").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s
 }
@@ -2909,25 +2912,20 @@ fn a_hovered_row_raises_its_1_12_description_on_the_era_seat() {
         1,
         "the description ALONE — the era's white name line is cut"
     );
-    // The era seat, `DefaultTooltipMixin`'s `ANCHOR_RIGHT` at x -10: BOTTOMLEFT on the label
-    // region's TOPRIGHT, 10 back.
+    // Deviation from the era's `ANCHOR_RIGHT` seat: the plate takes the screen's default corner
+    // (`GameTooltip_SetDefaultAnchor`), so a long text never covers the rows below.
     let owned: bool = s
         .eval(&format!("return GameTooltip:IsOwned({row}Tip)"))
         .unwrap();
     assert!(owned, "owned by the row's $parentTip region");
-    let (tip_right, tip_top): (f32, f32) = (
-        s.eval(&format!("return {row}Tip:GetRight()")).unwrap(),
-        s.eval(&format!("return {row}Tip:GetTop()")).unwrap(),
-    );
-    let (left, bottom): (f32, f32) = (
-        s.eval("return GameTooltip:GetLeft()").unwrap(),
-        s.eval("return GameTooltip:GetBottom()").unwrap(),
-    );
-    assert!(
-        (left - (tip_right - 10.0)).abs() < 0.01 && (bottom - tip_top).abs() < 0.01,
-        "plate at ({left}, {bottom}); the era seat is ({}, {tip_top})",
-        tip_right - 10.0
-    );
+    let seated: bool = s
+        .eval(
+            "local p, rel, rp, x, y = GameTooltip:GetPoint() \
+             return p == \"BOTTOMRIGHT\" and rel ~= nil and rel:GetName() == \"UIParent\" \
+               and rp == \"BOTTOMRIGHT\" and x == -13 and y == 70",
+        )
+        .unwrap();
+    assert!(seated, "the plate sits in UIParent's bottom-right corner");
 
     // Onto the checkbox: the row's OnLeave and the box's OnEnter land in one move.
     let (bl, br, bt, bb): (f32, f32, f32, f32) = (

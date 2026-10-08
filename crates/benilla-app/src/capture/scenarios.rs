@@ -1729,7 +1729,6 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         minute: 1380,
         ui: None,
     },
-    },
 ];
 
 /// GFX (volumetric light): the Goldshire lake bank among the trees (eye 2 yd over the feet).

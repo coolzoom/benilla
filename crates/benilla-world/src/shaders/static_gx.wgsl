@@ -1194,7 +1194,9 @@ fn interior_room_fixture(
     let direct_w = atten * nl * window;
     var s = 1.0;
     if (direct_w * w > TORCH_SKIP_EPS) {
-        s = torch_surface_shadow(pos_range.xyz, P, N);
+        s = torch_map_at(pos_range.xyz, P + N * TORCH_NORMAL_OFFSET, N, 0.0, strict);
+    } else if (strict) {
+        s = 0.0;
     }
     *direct += c_norm * direct_w * s * w;
     // MONKEY (soft falloff): the fill's profile is UNCHANGED in FORM — `(1 − d/r)²`, which is
@@ -1207,7 +1209,10 @@ fn interior_room_fixture(
     // candle count, or a dense room (the inn's ~10 fixtures vs the smithy's 3) piles fill up
     // until the rolloff saturates every surface to a flat white. `max` keeps the nearest/
     // brightest fixture's glow and leaves the direct term to carry the per-fixture relief.
-    *fill = max(*fill, c_fill * (k_fill * interior_window(d, fill_yd, INTERIOR_FILL_POW) * w));
+    // MONKEY (gfx): room bounce has no occlusion/transport path through an exterior wall.
+    if (!strict) {
+        *fill = max(*fill, c_fill * (k_fill * interior_window(d, fill_yd, INTERIOR_FILL_POW) * w));
+    }
 }
 
 fn interior_room_light(
@@ -1261,76 +1266,6 @@ fn interior_room_light(
             if (i < count) {
                 interior_room_fixture(i, P, N, room_inst, room_group, strict, k_fill, &direct, &fill);
             }
-        }
-        // MONKEY (soft falloff): `.w` is ALSO this fixture's EFFECTIVE RADIUS `R` in yards — the
-        // authored MOLT `attenuation_end` (or the M2 intensity bucket) already multiplied by the
-        // live `interiorAttenScale` at pack time. It replaces the flat 48 yd candidacy radius in
-        // `pos_range.w` on this lane, which is why the inn's 10 candles read as one uniform wash
-        // while the smithy's 3 forges read fine.
-        let reach_yd = color_lane.w;
-        // Candidacy is the FILL radius, not R: the wash reaches further than the direct pool (see
-        // the profile block), and rejecting at R would cut it off exactly at the pool's own edge —
-        // putting the rim back one term down.
-        let fill_yd = INTERIOR_FILL_SPAN * reach_yd;
-        let pos_range = wow_light.points[2u * i];
-        let to_light = pos_range.xyz - P;
-        let d2 = dot(to_light, to_light);
-        if (d2 > fill_yd * fill_yd) {
-            continue;
-        }
-        let d = sqrt(d2);
-        let c = color_lane.rgb;
-        // MONKEY (soft falloff): inverse square with the authored-start soft core, normalised so
-        // the 1 yd value is the retired hyperbolic's (profile block above).
-        // MONKEY (pool energy): a CONSTANT core radius in yards (profile block above) — the reach
-        // no longer scales the pool's brightness, only its window. `max` keeps the divide honest
-        // if the constant is ever tuned toward 0.
-        let r0 = max(INTERIOR_CORE_YD, 1e-3);
-        let atten = INTERIOR_CORE_GAIN / (1.0 + (d / r0) * (d / r0));
-        let window = interior_window(d, reach_yd, INTERIOR_DIRECT_POW);
-        let nl = max(
-            (dot(N, to_light / max(d, 1e-4)) + INTERIOR_WRAP) / (1.0 + INTERIOR_WRAP),
-            0.0,
-        );
-        // Normalised for BOTH terms: the table commits RAW over-gamut colour × intensity, and the
-        // smithy's three forges (1.4, 0.87, 0.4) drove the direct term to a washed-out white while
-        // the inn's unit candles sat where they should. The hue is what survives.
-        let c_norm = c / max(1.0, max(c.r, max(c.g, c.b)));
-        // Phase 1: this fixture's OWN cast shadow, sampled from its down-looking depth map
-        // (`torch_surface_shadow` correlates the fixture to its promoted map by position; 1.0 when
-        // it was not promoted). Per-fixture, so a pillar between the fragment and torch A darkens A's
-        // term without touching torch B's — the occlusion that makes an interior read
-        // lit-and-shadowed instead of flat. (`static_gx.wgsl` only; the wow_model copy of this
-        // function keeps the 1.0 `torch_shadow_for` stub — it has no group 3.)
-        // MONKEY (torch lane perf): the shadow sample is MULTIPLIED into the direct term, so
-        // where that term is already nothing the table scan and its four comparison taps buy
-        // nothing. And it very often is: `window` is exactly 0 past the fixture's reach, `nl` is 0
-        // on a surface facing away even under the wrap, and `w` is the claim weight a portal fade
-        // has taken to 0. The scan is by POSITION over up to sixteen slots, so this is the
-        // difference between "every interior fixture in range pays a scan on every fragment it
-        // touches" and "only the ones actually lighting it do". A branch rather than a `select`
-        // deliberately: the whole point is to NOT execute the taps.
-        let direct_w = atten * nl * window;
-        var s = 1.0;
-        if (direct_w * w > TORCH_SKIP_EPS) {
-            s = torch_map_at(pos_range.xyz, P + N * TORCH_NORMAL_OFFSET, N, 0.0, strict);
-        } else if (strict) {
-            s = 0.0;
-        }
-        direct += c_norm * direct_w * s * w;
-        // MONKEY (soft falloff): the fill's profile is UNCHANGED in FORM — `(1 − d/r)²`, which is
-        // exactly `interior_window(d, r, 1.0)` — and only its radius moved, from R to
-        // `INTERIOR_FILL_SPAN·R`. That is the whole "gentle wash between the pools": at the fixture
-        // it is still 1 (so `interiorFill` keeps its tuned meaning) and it decays to 0 at 2R with a
-        // vanishing derivative, so the floor half-way between two candles is dim, not black.
-        let c_fill = mix(c_norm, vec3<f32>(dot(c_norm, vec3<f32>(0.299, 0.587, 0.114))), 0.5);
-        // The DOMINANT fixture's fill, not the SUM: an ambient room glow must not scale with the
-        // candle count, or a dense room (the inn's ~10 fixtures vs the smithy's 3) piles fill up
-        // until the rolloff saturates every surface to a flat white. `max` keeps the nearest/
-        // brightest fixture's glow and leaves the direct term to carry the per-fixture relief.
-        // MONKEY (gfx): room bounce has no occlusion/transport path through an exterior wall.
-        if (!strict) {
-            fill = max(fill, c_fill * (k_fill * interior_window(d, fill_yd, INTERIOR_FILL_POW) * w));
         }
     }
     // Fill is INDIRECT bounce, so it is not shadowed; direct already carries each fixture's shadow.

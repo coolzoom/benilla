@@ -12,7 +12,7 @@
 #
 # Switches (environment):
 #   ANDROID_PROFILE=release|ship|play   cargo profile (default release)
-#   ANDROID_DEV=1                       build with the `dev` feature (instruments, egui panel)
+#   ANDROID_DEV=0                       build without the `dev` feature (instruments, egui panel), on by default
 #   ANDROID_SERIAL=<id>                 which device adb talks to
 #   ANDROID_REVERSE=0                   skip `adb reverse` of the server ports
 #
@@ -226,7 +226,7 @@ toolchain_env() {
 build() {
     toolchain_env
     local features=()
-    if [ "${ANDROID_DEV:-0}" = 1 ]; then
+    if [ "${ANDROID_DEV:-1}" = 1 ]; then
         features=(--features dev)
     fi
     say "cargo build -p benilla-android --target $TARGET --profile $PROFILE ${features[*]:-}"
@@ -504,7 +504,7 @@ usage() {
     echo "  4  推送到设备并运行（adb install、benilla.env、游戏数据、logcat）"
     echo "  5  全部（1 到 4）"
     echo "  data  只推送游戏数据"
-    echo "环境变量: ANDROID_PROFILE=release|ship|play  ANDROID_DEV=1  ANDROID_SERIAL=<id>  ANDROID_REVERSE=0"
+    echo "环境变量: ANDROID_PROFILE=release|ship|play  ANDROID_DEV=0  ANDROID_SERIAL=<id>  ANDROID_REVERSE=0"
 }
 
 # Each step as its own process, so a failed step returns to the menu; a `( … ) || true` subshell
