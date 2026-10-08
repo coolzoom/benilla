@@ -40,6 +40,12 @@ fn android_main(app: AndroidApp) {
         ..Default::default()
     });
     println!("android: app exit {exit:?}");
+    // Android keeps the process for the next launch, which calls `android_main` again, and winit
+    // builds one event loop per process (`RecreationAttempt`): the next launch must start a new one.
+    std::process::exit(match exit {
+        bevy::app::AppExit::Success => 0,
+        bevy::app::AppExit::Error(code) => code.get().into(),
+    });
 }
 
 /// Sets `benilla.env`'s variables, then `WOW_DATA` and `BENILLA_HOME` under `dir` unless the file

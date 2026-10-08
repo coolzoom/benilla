@@ -113,6 +113,8 @@ pub(crate) mod test_support;
 mod text_filter;
 mod text_reshape;
 mod textinput;
+#[cfg(target_os = "android")]
+mod touch_mouse;
 mod transport;
 mod tutorial;
 mod ui_action;
@@ -450,6 +452,9 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
             println!("executor: Render -> single-threaded, unpipelined (WOW_GPU_SERIAL=1)");
         }
     }
+
+    #[cfg(target_os = "android")]
+    app.add_plugins(touch_mouse::TouchMousePlugin);
 
     // A crate on top of benilla adds its plugins here ([`run_with`]).
     if let Some(extend) = extend {

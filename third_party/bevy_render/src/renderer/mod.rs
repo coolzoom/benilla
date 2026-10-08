@@ -125,6 +125,13 @@ pub fn render_system(
     }
 }
 
+/// benilla: whether the point-light shadow map is one cube rather than a cube array, WebGL's
+/// layout: on GL, sampling a depth cube array at a level needs `GL_EXT_texture_shadow_lod`, which an
+/// emulated GLES (MuMu) lacks (third_party/bevy_render/BENILLA.md).
+pub fn point_shadow_cube_only(adapter: &RenderAdapter) -> bool {
+    adapter.get_info().backend == wgpu::Backend::Gl
+}
+
 /// This queue is used to enqueue tasks for the GPU to execute asynchronously.
 #[derive(Resource, Clone, Deref, DerefMut)]
 pub struct RenderQueue(pub Arc<WgpuWrapper<Queue>>);

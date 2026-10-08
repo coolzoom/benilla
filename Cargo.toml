@@ -52,9 +52,11 @@ lua-src = { path = "third_party/lua-src" }
 # kira 0.12.4, patched to compute spatial gains and the volume tween per output chunk and
 # interpolate them, not per sample frame (`third_party/kira/BENILLA.md`).
 kira = { path = "third_party/kira" }
-# bevy_render 0.18.1, patched to view a non-sRGB surface in its own format where the adapter cannot
-# view it as sRGB, as on an emulated GLES (`third_party/bevy_render/BENILLA.md`).
+# bevy_render and bevy_pbr 0.18.1, patched for an emulated GLES: an sRGB stage for a surface the
+# adapter cannot view as sRGB, and WebGL's single point-shadow cube on GL
+# (`third_party/bevy_render/BENILLA.md`, `third_party/bevy_pbr/BENILLA.md`).
 bevy_render = { path = "third_party/bevy_render" }
+bevy_pbr = { path = "third_party/bevy_pbr" }
 
 # Dependencies at opt-level 3 in dev: at opt-level 0, avian/parry collision drops a run to <1 fps.
 [profile.dev.package."*"]

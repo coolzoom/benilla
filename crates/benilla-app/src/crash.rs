@@ -25,6 +25,10 @@ pub(crate) fn install(build: BuildId) {
     std::panic::set_hook(Box::new(move |info| {
         previous(info);
         report(info, build, started.elapsed());
+        // Android keeps a crashed process for the next launch, where winit refuses a second event
+        // loop; ending it here, after the report, lets the next launch start clean.
+        #[cfg(target_os = "android")]
+        std::process::exit(101);
     }));
 }
 

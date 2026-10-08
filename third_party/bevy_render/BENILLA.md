@@ -32,6 +32,13 @@ the frame with one fullscreen pass before presenting. A pass, not a copy: GLES s
 On every adapter with an sRGB surface, or with `SURFACE_VIEW_FORMATS`, the behaviour is
 upstream's byte for byte.
 
+## Patch 3 — one point-shadow cube on GL, `src/renderer/mod.rs` and `pipeline_cache.rs`
+
+`renderer::point_shadow_cube_only` is true on the GL backend, where sampling a depth cube array at
+a level needs `GL_EXT_texture_shadow_lod`, which MuMu's GLES lacks. There `PipelineCache::new` adds
+`NO_CUBE_ARRAY_TEXTURES_SUPPORT`, as it does for the iOS simulator; the `bevy_pbr` fork binds and
+views the point-shadow map to match (`third_party/bevy_pbr/BENILLA.md`).
+
 ## How to check
 
     diff -ru ~/.cargo/registry/src/index.crates.io-*/bevy_render-0.18.1/src third_party/bevy_render/src

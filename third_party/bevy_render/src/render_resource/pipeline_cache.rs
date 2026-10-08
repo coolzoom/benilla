@@ -280,7 +280,7 @@ impl PipelineCache {
             global_shader_defs.push("SIXTEEN_BYTE_ALIGNMENT".into());
         }
 
-        if cfg!(target_abi = "sim") {
+        if cfg!(target_abi = "sim") || crate::renderer::point_shadow_cube_only(&render_adapter) {
             global_shader_defs.push("NO_CUBE_ARRAY_TEXTURES_SUPPORT".into());
         }
 
