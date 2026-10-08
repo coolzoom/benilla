@@ -598,6 +598,27 @@ fn cast_result(
     // Is this the reply to our outstanding cast (`0x6e7408 cmp ecx,[0xceca88]`)? Read before either
     // arm clears the guard: both clears are the reference's one `0x6e741a call 0x6e4940(0x1c)`.
     let in_flight = pending.committed(Instant::now()) == Some(spell_id);
+    // The spell queue's refused early cast goes out again instead of failing: no red line, no GCD
+    // clear, no fail edge, and the guard keeps holding until the resend resolves.
+    if !success
+        && matches!(
+            reason,
+            Some(
+                crate::spell::inflight::REFUSED_IN_PROGRESS
+                    | crate::spell::inflight::REFUSED_NOT_READY
+            )
+        )
+        && pending.schedule_resend(spell_id, Instant::now())
+    {
+        if *crate::net::CAST_TRACE {
+            info!("cast-trace: RECV CAST_RESULT refusal {reason:?} — spell {spell_id} resends");
+        }
+        benilla_assets::trace::line(
+            "cast",
+            &format!("refused spell {spell_id} reason={reason:?}"),
+        );
+        return None;
+    }
     if !success {
         // `HandleCastFailed 0x6e1a00` clears the GCD armed at send (`0x6e1d83 → 0x6e1630`), and the
         // bit-25 revert below drops a parked record; the spell's own recovery starts at SPELL_GO,
@@ -683,7 +704,7 @@ fn cast_result(
     //   second sting never resets the swing timer; with no record to refresh, we send nothing.
     // The chained spell is returned; `on_cast_result` hands it to the ladder in the same call.
     if in_flight {
-        pending.clear_if(spell_id);
+        pending.complete_if(spell_id, false);
         if let Some(next) = spells
             .and_then(|s| s.catalog.get(spell_id))
             .map(|d| d.modal_next_spell)
@@ -759,14 +780,15 @@ fn spell_start(
         );
     }
     // Our own timed cast opens the bar.
-    if self_guid.0 == Some(caster) && cast_time_ms > 0 {
-        if !ranged_slot {
+    if self_guid.0 == Some(caster) {
+        if cast_time_ms > 0 && !ranged_slot {
             cast_bar.0.push(CastBarEdge::Start {
                 spell_id,
                 cast_time_ms,
             });
         }
-        // The real cast time replaces the guard's send-time deadline, ranged casts included.
+        // The real cast time replaces the guard's send-time deadline, ranged casts included; an
+        // instant's START only retires an early-opened predecessor.
         pending.refine(cast_time_ms, Instant::now());
     }
     if let Some(&e) = index.0.get(&caster) {
@@ -905,7 +927,7 @@ fn spell_go(
         if completes_our_cast {
             cast_bar.0.push(CastBarEdge::Stop);
         }
-        pending.clear_if(spell_id);
+        pending.complete_if(spell_id, true);
         // The queued strike fired on this swing: the queue opens here, like the in-flight finish.
         queued_melee.clear_if(spell_id);
 

@@ -57,8 +57,11 @@ struct AoView {
 
 /// Dev tuning knob `WOW_AO_<name>=<f32>`, read once per name; `None` keeps the tier value.
 fn tuning(name: &'static str) -> Option<f32> {
-    static KNOBS: std::sync::Mutex<Vec<(&'static str, Option<f32>)>> = std::sync::Mutex::new(Vec::new());
-    let mut knobs = KNOBS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    static KNOBS: std::sync::Mutex<Vec<(&'static str, Option<f32>)>> =
+        std::sync::Mutex::new(Vec::new());
+    let mut knobs = KNOBS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some((_, v)) = knobs.iter().find(|(n, _)| *n == name) {
         return *v;
     }
@@ -72,9 +75,17 @@ fn tuning(name: &'static str) -> Option<f32> {
 
 impl AoView {
     fn tier(tier: u8) -> Self {
-        let (radius, strength, samples) = if tier >= 2 { (1.5, 0.7, 12.0) } else { (1.2, 0.65, 6.0) };
+        let (radius, strength, samples) = if tier >= 2 {
+            (1.5, 0.7, 12.0)
+        } else {
+            (1.2, 0.65, 6.0)
+        };
         // Outdoor contacts (house bases, trunks) sit 30-60 yd out; Low stops sooner.
-        let fade = if tier >= 2 { (60.0, 120.0) } else { (45.0, 90.0) };
+        let fade = if tier >= 2 {
+            (60.0, 120.0)
+        } else {
+            (45.0, 90.0)
+        };
         let radius = tuning("RADIUS").unwrap_or(radius);
         let strength = tuning("STRENGTH").unwrap_or(strength).min(1.0);
         let bias = tuning("BIAS").unwrap_or(0.05);
@@ -91,7 +102,11 @@ impl AoView {
 fn debug_mode() -> u8 {
     static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| {
-        std::env::var("WOW_AO_DEBUG").ok().and_then(|v| v.parse().ok()).unwrap_or(0).min(5)
+        std::env::var("WOW_AO_DEBUG")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+            .min(5)
     })
 }
 
@@ -136,6 +151,22 @@ impl Plugin for AmbientOcclusionPlugin {
             .add_render_graph_node::<ViewNodeRunner<AoNode>>(Core3d, AoLabel)
             // After every solid path (static_gx precedes MainOpaquePass), before the water copy.
             .add_render_graph_edges(Core3d, (Node3d::MainOpaquePass, AoLabel, WaterDepthLabel));
+    }
+
+    /// Feature 18 evaluates the occluded opaque scene, and the water refracts its result.
+    /// `DlssNrPlugin` registers its node in its own `finish`, which runs before this one.
+    #[cfg(feature = "dlss")]
+    fn finish(&self, app: &mut App) {
+        // `build` registered no node without a renderer.
+        if !app.is_plugin_added::<AssetPlugin>() {
+            return;
+        }
+        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            render_app.add_render_graph_edges(
+                Core3d,
+                (AoLabel, benilla_dlss5::DlssNrEvalLabel, WaterDepthLabel),
+            );
+        }
     }
 }
 
@@ -185,11 +216,7 @@ enum Stage {
 
 const AO_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
-fn init_pipeline(
-    mut commands: Commands,
-    shader: Res<AoShader>,
-    fullscreen: Res<FullscreenShader>,
-) {
+fn init_pipeline(mut commands: Commands, shader: Res<AoShader>, fullscreen: Res<FullscreenShader>) {
     let with_depth = |label: &'static str, multisampled: bool| {
         BindGroupLayoutDescriptor::new(
             label,
@@ -213,7 +240,10 @@ fn init_pipeline(
         &BindGroupLayoutEntries::with_indices(
             ShaderStages::FRAGMENT,
             (
-                (0, texture_2d(TextureSampleType::Float { filterable: false })),
+                (
+                    0,
+                    texture_2d(TextureSampleType::Float { filterable: false }),
+                ),
                 (3, uniform_buffer::<AoView>(false)),
             ),
         ),
@@ -242,7 +272,11 @@ impl SpecializedRenderPipeline for AoPipeline {
             defs.push("MULTISAMPLED".into());
         }
         let (label, entry, layout) = match stage {
-            Stage::Ao => ("ssao", "ao_main", self.ao_layouts[multisampled as usize].clone()),
+            Stage::Ao => (
+                "ssao",
+                "ao_main",
+                self.ao_layouts[multisampled as usize].clone(),
+            ),
             Stage::Blur => ("ssao_blur", "blur_main", self.blur_layout.clone()),
             Stage::Apply => (
                 "ssao_apply",
@@ -272,7 +306,11 @@ impl SpecializedRenderPipeline for AoPipeline {
                 shader_defs: defs,
                 entry_point: Some(entry.into()),
                 targets: vec![Some(ColorTargetState {
-                    format: if stage == Stage::Apply { format } else { AO_FORMAT },
+                    format: if stage == Stage::Apply {
+                        format
+                    } else {
+                        AO_FORMAT
+                    },
                     blend,
                     write_mask: ColorWrites::ALL,
                 })],
@@ -313,8 +351,9 @@ fn prepare_pipelines(
     for (entity, target, msaa) in &views {
         let format = target.main_texture_format();
         let samples = msaa.samples();
-        let ids = [Stage::Ao, Stage::Blur, Stage::Apply]
-            .map(|stage| specialized.specialize(&cache, &pipeline, (stage, format, samples, debug)));
+        let ids = [Stage::Ao, Stage::Blur, Stage::Apply].map(|stage| {
+            specialized.specialize(&cache, &pipeline, (stage, format, samples, debug))
+        });
         commands.entity(entity).insert(ViewAoPipelines(ids));
     }
 }
@@ -333,7 +372,9 @@ fn prepare_textures(
 ) {
     for (entity, camera) in &views {
         // The depth texture is sized to the physical target.
-        let Some(size) = camera.physical_target_size else { continue };
+        let Some(size) = camera.physical_target_size else {
+            continue;
+        };
         let half = UVec2::new(size.x.div_ceil(2), size.y.div_ceil(2)).max(UVec2::ONE);
         let mut texture = |label: &'static str| {
             cache.get(
@@ -440,10 +481,7 @@ impl ViewNode for AoNode {
         let blur_bind = device.create_bind_group(
             "ssao_blur",
             &cache.get_bind_group_layout(&layouts.blur_layout),
-            &BindGroupEntries::with_indices((
-                (0, &textures.raw.default_view),
-                (3, params.clone()),
-            )),
+            &BindGroupEntries::with_indices(((0, &textures.raw.default_view), (3, params.clone()))),
         );
         let apply_bind = device.create_bind_group(
             "ssao_apply",
@@ -484,8 +522,22 @@ impl ViewNode for AoNode {
             span.end(&mut pass);
         };
         let encoder = context.command_encoder();
-        half_pass(encoder, "ssao", &textures.raw.default_view, ao, &ao_bind, &[view_offset.offset]);
-        half_pass(encoder, "ssao_blur", &textures.blurred.default_view, blur, &blur_bind, &[]);
+        half_pass(
+            encoder,
+            "ssao",
+            &textures.raw.default_view,
+            ao,
+            &ao_bind,
+            &[view_offset.offset],
+        );
+        half_pass(
+            encoder,
+            "ssao_blur",
+            &textures.blurred.default_view,
+            blur,
+            &blur_bind,
+            &[],
+        );
         // The main attachment (MSAA + resolve when multisampled), so later passes load it darkened.
         let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
             label: Some("ssao_apply"),
@@ -524,14 +576,23 @@ mod tests {
         // The registered default is Off: no pass, image unchanged.
         app.update();
         assert!(app.world().get::<AoView>(camera).is_none());
-        app.world_mut().resource_mut::<VideoConfig>().ambient_occlusion = 1;
+        app.world_mut()
+            .resource_mut::<VideoConfig>()
+            .ambient_occlusion = 1;
         app.update();
         let low = *app.world().get::<AoView>(camera).unwrap();
         assert_eq!(low.params.z, 6.0);
         assert!(app.world().get::<AoView>(preview).is_none());
-        let usage = app.world().get::<Camera3d>(camera).unwrap().depth_texture_usages.0;
+        let usage = app
+            .world()
+            .get::<Camera3d>(camera)
+            .unwrap()
+            .depth_texture_usages
+            .0;
         assert!(usage & TextureUsages::TEXTURE_BINDING.bits() != 0);
-        app.world_mut().resource_mut::<VideoConfig>().ambient_occlusion = 2;
+        app.world_mut()
+            .resource_mut::<VideoConfig>()
+            .ambient_occlusion = 2;
         app.update();
         let high = *app.world().get::<AoView>(camera).unwrap();
         assert_eq!(high.params.z, 12.0);

@@ -31,8 +31,11 @@ use benilla_srp::{NormalizedString, PublicKey, SrpClientChallenge, SESSION_KEY_L
 
 /// The port a stock vmangos `realmd` listens on.
 pub const AUTH_PORT: u16 = 3724;
-/// The 1.12.1 client build we present to the server.
+/// The 1.12.1 client build we present to realmd and the world server.
 pub const CLIENT_BUILD: u16 = 5875;
+/// Turtle WoW's 1.18.1 build. Its realmd rejects 5875 during logon proof, while its world server
+/// still expects the 1.12.1 wire build in [`CLIENT_BUILD`]; pass this to [`logon_as_build`].
+pub const TURTLE_LOGIN_BUILD: u16 = 7272;
 /// Challenges [`logon`] draws for an unambiguous `B`; one in ~137 is not, so all 8 fail ~10⁻¹⁷.
 const MAX_CHALLENGE_DIALS: u32 = 8;
 
@@ -165,6 +168,11 @@ impl Logon {
 
 /// The full SRP6 logon against a vanilla `realmd`, then the realm list.
 pub fn logon(host: &str, username: &str, password: &str) -> Result<Logon> {
+    logon_as_build(host, username, password, CLIENT_BUILD)
+}
+
+/// [`logon`], presenting `build` to realmd (the world server always gets [`CLIENT_BUILD`]).
+pub fn logon_as_build(host: &str, username: &str, password: &str, build: u16) -> Result<Logon> {
     let (host, port) = host_port(host, AUTH_PORT);
 
     let username_n =
@@ -179,7 +187,7 @@ pub fn logon(host: &str, username: &str, password: &str) -> Result<Logon> {
         let mut dialed = None;
         for _ in 0..MAX_CHALLENGE_DIALS {
             let mut stream = dial(host, port)?;
-            auth::write_logon_challenge(&mut stream, &username.to_uppercase(), CLIENT_BUILD)
+            auth::write_logon_challenge(&mut stream, &username.to_uppercase(), build)
                 .context("sending logon challenge")?;
             let reply =
                 auth::read_challenge_reply(&mut stream).context("reading logon challenge reply")?;

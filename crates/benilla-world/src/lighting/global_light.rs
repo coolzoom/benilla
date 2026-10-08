@@ -194,6 +194,7 @@ impl LightRooms {
 ///     hall, guest rooms and basement claim NOTHING.
 ///   * **NSabbey** — 42 fixtures over 14 groups, but `Main Hall`, `LftWng`, `RtWng`, `Library`,
 ///     `Library2`, `Library Wing` and `Stairs2` are named by no MOLR either.
+///
 /// Gating purely on MOLR would therefore black out most of both buildings — the abbey's look is
 /// the one the owner signed off, so that is a regression, not a fix. MOLR is authored for the
 /// reference's own purpose (register GL lights while drawing a VISIBLE group's doodads and units),
@@ -317,24 +318,103 @@ pub const CLAIM_EXT_OK: u32 = 1 << 16;
 /// `static_gx.wgsl`.**
 pub const CLAIM_ENTRY_SHIFT: u32 = 17;
 
+/// MONKEY (room light lists): the ROOM INDEX that follows the per-light claim records in the same
+/// buffer, so a fragment visits only the fixtures that can light its room instead of the whole
+/// point table. Three regions, every list ascending by light index:
+/// - a hash table of [`ROOM_INDEX_SLOTS`] 4-word slots `[instance, group key, list offset, count]`
+///   keyed by [`room_index_hash`] with linear probing; `instance 0` is an empty slot (a gated claim
+///   never carries instance 0, see `RoomClaim::build`);
+/// - the UNCLAIMED list `[count, i...]`: the interior fixtures with claim count 0, which light every
+///   room on the fail-open lane;
+/// - the claimant lists the hash slots point into.
+///
+/// A fragment's candidates are its room's list merged with the unclaimed list, which is exactly the
+/// set `interior_room_admits` can weight above zero for a fragment that has a room key. **The layout
+/// constants must equal their twins in `static_gx.wgsl`.**
+pub const ROOM_INDEX_SLOTS: usize = 2048;
+/// MONKEY (room light lists): the first word of the hash table.
+pub const ROOM_INDEX_BASE: usize = ROOM_CLAIM_STRIDE * MAX_POINT_LIGHTS;
+/// MONKEY (room light lists): the unclaimed list's count word; its entries follow.
+pub const ROOM_UNCLAIMED_BASE: usize = ROOM_INDEX_BASE + 4 * ROOM_INDEX_SLOTS;
+/// MONKEY (room light lists): the claimant lists. At most one entry per claim slot of every light.
+pub const ROOM_LIST_BASE: usize = ROOM_UNCLAIMED_BASE + 1 + MAX_POINT_LIGHTS;
+/// MONKEY (room light lists): the whole table's words — the claim records plus the room index.
+pub const ROOM_TABLE_WORDS: usize = ROOM_LIST_BASE + ROOM_CLAIM_MAX * MAX_POINT_LIGHTS;
+
+/// MONKEY (room light lists): the room index's hash of a room key, `group_key` in the claim word's
+/// `group + 1` form. **Must equal `room_index_hash` in `static_gx.wgsl`** (wrapping u32 arithmetic).
+pub fn room_index_hash(instance: u32, group_key: u32) -> usize {
+    let mut h = instance.wrapping_mul(0x9E37_79B1) ^ group_key.wrapping_mul(0x85EB_CA77);
+    h ^= h >> 15;
+    h as usize & (ROOM_INDEX_SLOTS - 1)
+}
+
+/// MONKEY (room light lists): rebuild the room index over the first `count` claim records of
+/// `words`. `interior(i)` is the shader's own lane test on light `i` (its colour-row `.w > 0.5`):
+/// an exterior light never enters the room loop, so it enters no list.
+pub fn build_room_index(words: &mut [u32], count: usize, interior: impl Fn(usize) -> bool) {
+    words[ROOM_INDEX_BASE..ROOM_TABLE_WORDS].fill(0);
+    let mut unclaimed = 0usize;
+    // (instance, group key, light): sorted, each room's run is contiguous and ascending by light.
+    let mut claims: Vec<(u32, u32, u32)> = Vec::new();
+    for i in 0..count.min(MAX_POINT_LIGHTS) {
+        if !interior(i) {
+            continue;
+        }
+        let record = &words[i * ROOM_CLAIM_STRIDE..][..ROOM_CLAIM_STRIDE];
+        let (instance, n) = (record[0], record[1] as usize);
+        if n == 0 {
+            words[ROOM_UNCLAIMED_BASE + 1 + unclaimed] = i as u32;
+            unclaimed += 1;
+            continue;
+        }
+        let start = claims.len();
+        for &claim in &record[2..2 + n.min(ROOM_CLAIM_MAX)] {
+            let key = claim & 0xffff;
+            // One entry a room per light: two claim words can name one group (the CPU id's
+            // exterior-deny bit is not part of the key), and the shader takes the first match.
+            if key != 0 && !claims[start..].iter().any(|&(_, k, _)| k == key) {
+                claims.push((instance, key, i as u32));
+            }
+        }
+    }
+    words[ROOM_UNCLAIMED_BASE] = unclaimed as u32;
+    claims.sort_unstable();
+    let mut offset = 0usize;
+    for run in claims.chunk_by(|a, b| (a.0, a.1) == (b.0, b.1)) {
+        let (instance, key, _) = run[0];
+        let mut slot = room_index_hash(instance, key);
+        // At most `ROOM_CLAIM_MAX * MAX_POINT_LIGHTS` rooms against 2048 slots: never full.
+        while words[ROOM_INDEX_BASE + 4 * slot] != 0 {
+            slot = (slot + 1) & (ROOM_INDEX_SLOTS - 1);
+        }
+        let entry = &mut words[ROOM_INDEX_BASE + 4 * slot..][..4];
+        entry.copy_from_slice(&[instance, key, offset as u32, run.len() as u32]);
+        for (k, &(_, _, light)) in run.iter().enumerate() {
+            words[ROOM_LIST_BASE + offset + k] = light;
+        }
+        offset += run.len();
+    }
+}
+
 /// MONKEY (room gate): this frame's claim table, index-parallel with [`WowLightData`]'s point
 /// entries. Its own resource and its own GPU buffer on purpose: [`LightStd430`] is mirrored by
 /// three shaders plus the portrait booth and must never be resized, and only `static_gx` reads
 /// this. `static_gx::render` owns the buffer and the binding.
 #[derive(Resource, Clone, ExtractResource)]
-pub struct RoomClaimTable(pub Box<[u32; ROOM_CLAIM_STRIDE * MAX_POINT_LIGHTS]>);
+pub struct RoomClaimTable(pub Box<[u32; ROOM_TABLE_WORDS]>);
 
 /// MONKEY (room gate): the claim table's byte size — the one place `static_gx::render` sizes its
 /// GPU buffer from, so the table cannot grow here and leave the binding short (a bound storage
 /// buffer smaller than the shader's runtime-sized array fails validation at draw time, which
 /// vanishes every building).
 pub fn room_claim_bytes() -> u64 {
-    (ROOM_CLAIM_STRIDE * MAX_POINT_LIGHTS * std::mem::size_of::<u32>()) as u64
+    (ROOM_TABLE_WORDS * std::mem::size_of::<u32>()) as u64
 }
 
 impl Default for RoomClaimTable {
     fn default() -> Self {
-        Self(Box::new([0; ROOM_CLAIM_STRIDE * MAX_POINT_LIGHTS]))
+        Self(Box::new([0; ROOM_TABLE_WORDS]))
     }
 }
 
@@ -699,7 +779,12 @@ pub(super) fn register(app: &mut App) {
             // fallback for one frame — see that fallback's note in `build_light_data`.
             // MONKEY (p0 MonkeyFrame): the programme block is packed right after the table.
             // GFX (moonlight): the moon row is written into the frame just before it is packed.
-            (classify_light_lanes, build_light_data, super::moonlight::update_moonlight, pack_monkey_frame)
+            (
+                classify_light_lanes,
+                build_light_data,
+                super::moonlight::update_moonlight,
+                pack_monkey_frame,
+            )
                 .chain()
                 .after(bevy::transform::TransformSystems::Propagate)
                 .after(super::update_time_lighting),
@@ -863,7 +948,9 @@ impl ShadowHandover {
         self.ramp = (self.ramp + dt.max(0.0) / 1.5).min(1.0);
         self.weight = match wanted {
             Some(ShadowBody::Sun) => pack_shadow_lane(sun * self.ramp, 0.0),
-            Some(ShadowBody::Moon) => pack_shadow_lane(0.0, moon * strength.clamp(0.0, 1.0) * self.ramp),
+            Some(ShadowBody::Moon) => {
+                pack_shadow_lane(0.0, moon * strength.clamp(0.0, 1.0) * self.ramp)
+            }
             None => 0.0,
         };
     }
@@ -963,6 +1050,7 @@ fn unpack_shadow_lane(w: f32) -> (f32, f32) {
 ///     reach it from below, and cannot leave it from above.
 ///   * `u32(max(w - 1, 0) + 0.5)` — the debug decode (`static_gx` x3, `wow_model`, `terrain`):
 ///     `debug + f + 0.5` truncates to `debug` for every `f` in `[0, 0.5)`.
+///
 /// **0.49** keeps a clear margin under that 0.5 cliff while spending the whole of the rest of the
 /// range on the value. `1 + debug` is an exact integer in f32, so the shader's `fract(w)` returns
 /// `daylight * 0.49` bit-for-bit up to the f32 ulp at `w <= 5.49` (~5e-7 — four orders of magnitude
@@ -1268,7 +1356,7 @@ impl RoomClaim {
                 Some(g) => {
                     // MONKEY (soft portal claims): the entry weight rides the spare high bits.
                     let entry = self.fades[i].entry.clamp(0.0, 1.0);
-                    u32::from(*g & !LIT_ROOM_EXT_DENY) + 1
+                    (u32::from(*g & !LIT_ROOM_EXT_DENY) + 1)
                         | if *g & LIT_ROOM_EXT_DENY == 0 {
                             CLAIM_EXT_OK
                         } else {
@@ -1520,103 +1608,105 @@ fn build_light_data(
                 && gt.translation().distance_squared(cam_pos)
                     < INTERIOR_NEAR_ADMIT * INTERIOR_NEAR_ADMIT)
         })
-        .filter_map(|(pl, gt, rooms, synthetic, reach, lane_of, lit_rooms, flicker, daylight, spell)| {
-            let p = gt.translation();
-            let d2 = p.distance_squared(cam_pos);
-            (d2 < POINT_PACK_RADIUS * POINT_PACK_RADIUS).then(|| {
-                // MONKEY (merge): `WorldPointLight::color` is already linear RGB.
-                let c = pl.color;
-                // The authored intensity, BEFORE the fire gain: the pool's geometry must not move
-                // when the user dims the invented lights, only its brightness.
-                let base = pl.intensity / (4.0 * std::f32::consts::PI);
-                // MONKEY (fire GO lights): the live `fireLightGain` folds in HERE, over the
-                // recovered colour×intensity, and only for a synthesised source. At spawn it
-                // would need a world respawn to retune; here the dial moves the frame it changes.
-                // MONKEY (spellLightGain): …and the spell lane's own gain INSTEAD of it on a
-                // spell row. Every spell light is also tagged synthetic (it is an invented source
-                // and the census counts it as one), so the arms must be ordered, not summed: a
-                // fireball scaled by both dials would darken when the player turned the hearths
-                // down, which is precisely the coupling the second cvar exists to cut.
-                let s = base
-                    * if spell {
-                        spell_gain.0.max(0.0)
-                    } else if synthetic {
-                        fire_gain.0.max(0.0)
+        .filter_map(
+            |(pl, gt, rooms, synthetic, reach, lane_of, lit_rooms, flicker, daylight, spell)| {
+                let p = gt.translation();
+                let d2 = p.distance_squared(cam_pos);
+                (d2 < POINT_PACK_RADIUS * POINT_PACK_RADIUS).then(|| {
+                    // MONKEY (merge): `WorldPointLight::color` is already linear RGB.
+                    let c = pl.color;
+                    // The authored intensity, BEFORE the fire gain: the pool's geometry must not move
+                    // when the user dims the invented lights, only its brightness.
+                    let base = pl.intensity / (4.0 * std::f32::consts::PI);
+                    // MONKEY (fire GO lights): the live `fireLightGain` folds in HERE, over the
+                    // recovered colour×intensity, and only for a synthesised source. At spawn it
+                    // would need a world respawn to retune; here the dial moves the frame it changes.
+                    // MONKEY (spellLightGain): …and the spell lane's own gain INSTEAD of it on a
+                    // spell row. Every spell light is also tagged synthetic (it is an invented source
+                    // and the census counts it as one), so the arms must be ordered, not summed: a
+                    // fireball scaled by both dials would darken when the player turned the hearths
+                    // down, which is precisely the coupling the second cvar exists to cut.
+                    let s = base
+                        * if spell {
+                            spell_gain.0.max(0.0)
+                        } else if synthetic {
+                            fire_gain.0.max(0.0)
+                        } else {
+                            1.0
+                        };
+                    // MONKEY (flame flicker): the fire wobble, folded in at the very last moment — over
+                    // the committed colour and NOWHERE else. Deliberately downstream of `base`, which
+                    // still feeds the reach/lane below unmodulated: a breathing REACH would move the
+                    // interior window, re-decide the room gate's portal hop and re-rank the torch
+                    // shadow casters every frame, i.e. exactly the frame-rate thrash this feature
+                    // exists to avoid. Only the brightness moves; the pool's geometry is frozen.
+                    //
+                    // `elapsed_secs` (absolute, never a delta) is what makes it frame-rate independent:
+                    // the same instant gives the same brightness whatever the frame took.
+                    let fm = flicker.map_or(FlickerMod::STEADY, |f| {
+                        f.at(now_secs, dynamic_interiors.flicker)
+                    });
+                    let s = s * fm.intensity;
+                    let rgb = commit_raw([c[0] * s, c[1] * s, c[2] * s * fm.blue]);
+                    // MONKEY (light lane by position): a light is INTERIOR iff it PHYSICALLY STANDS in
+                    // an interior-class WMO group — the verdict [`classify_light_lanes`] (static) or
+                    // the carried-light claim (entities) wrote onto it. Claiming a room is no longer
+                    // the test: Stormwind's street torches claim exterior-class groups and must light
+                    // the cobbles, while the Goldshire inn's fixtures claim an exterior-flagged group
+                    // from inside the building and must NOT light the lawn (see [`LightLane`]).
+                    //
+                    // No lane yet ⇒ fall back to the OLD `LightRooms` rule rather than to "exterior".
+                    // A light lives one or two frames before the classifier's first pass (it spawns in
+                    // the stream stage, the classifier runs the frame after), and the conservative
+                    // arm of that gap is the pre-change behaviour: a MOLT fixture starts interior and
+                    // is corrected outward, never the reverse — so the gap can never flash a pool onto
+                    // an inn's lawn.
+                    let interior = lane_of.map_or_else(|| rooms.is_some(), |l| l.interior);
+                    // MONKEY (darkness gains): `interiorGain` dims the room lane's third input — every
+                    // INTERIOR fixture's committed colour — downstream of the fire gain and the
+                    // flicker, so those two keep their own meanings ("how bright is this invented
+                    // source" / "how hard does it breathe") and this one reads purely as "how dark is
+                    // the room". The EXTERIOR half of the table is untouched on purpose: an outdoor
+                    // campfire belongs to the night law, which dims the sky around it and not it.
+                    //
+                    // And so is the DAYLIGHT FIXTURE ([`super::DaylightFixture`]) — an interior-lane
+                    // entry that IS the sun standing in a doorway. A sunlit opening must not dim with
+                    // the room's candles: this dial means "how dark is the CANDLELIGHT". Nor does
+                    // `nightGain` claim it instead — that one dims the night, and a daylight fixture is
+                    // already scaled to nothing by its own day envelope (`daylight_target`'s `sun_w`,
+                    // the same curve) by the time the night dim is at full strength.
+                    // MONKEY (lava light): lava borrows the caster exclusion, not the sun's gain exemption.
+                    let daylight = daylight.is_some_and(|f| f.how != super::DaylightHow::Lava);
+                    let rgb = if interior && !daylight {
+                        rgb.map(|c| c * dynamic_interiors.interior_gain)
                     } else {
-                        1.0
+                        rgb
                     };
-                // MONKEY (flame flicker): the fire wobble, folded in at the very last moment — over
-                // the committed colour and NOWHERE else. Deliberately downstream of `base`, which
-                // still feeds the reach/lane below unmodulated: a breathing REACH would move the
-                // interior window, re-decide the room gate's portal hop and re-rank the torch
-                // shadow casters every frame, i.e. exactly the frame-rate thrash this feature
-                // exists to avoid. Only the brightness moves; the pool's geometry is frozen.
-                //
-                // `elapsed_secs` (absolute, never a delta) is what makes it frame-rate independent:
-                // the same instant gives the same brightness whatever the frame took.
-                let fm = flicker.map_or(FlickerMod::STEADY, |f| {
-                    f.at(now_secs, dynamic_interiors.flicker)
-                });
-                let s = s * fm.intensity;
-                let rgb = commit_raw([c[0] * s, c[1] * s, c[2] * s * fm.blue]);
-                // MONKEY (light lane by position): a light is INTERIOR iff it PHYSICALLY STANDS in
-                // an interior-class WMO group — the verdict [`classify_light_lanes`] (static) or
-                // the carried-light claim (entities) wrote onto it. Claiming a room is no longer
-                // the test: Stormwind's street torches claim exterior-class groups and must light
-                // the cobbles, while the Goldshire inn's fixtures claim an exterior-flagged group
-                // from inside the building and must NOT light the lawn (see [`LightLane`]).
-                //
-                // No lane yet ⇒ fall back to the OLD `LightRooms` rule rather than to "exterior".
-                // A light lives one or two frames before the classifier's first pass (it spawns in
-                // the stream stage, the classifier runs the frame after), and the conservative
-                // arm of that gap is the pre-change behaviour: a MOLT fixture starts interior and
-                // is corrected outward, never the reverse — so the gap can never flash a pool onto
-                // an inn's lawn.
-                let interior = lane_of.map_or_else(|| rooms.is_some(), |l| l.interior);
-                // MONKEY (darkness gains): `interiorGain` dims the room lane's third input — every
-                // INTERIOR fixture's committed colour — downstream of the fire gain and the
-                // flicker, so those two keep their own meanings ("how bright is this invented
-                // source" / "how hard does it breathe") and this one reads purely as "how dark is
-                // the room". The EXTERIOR half of the table is untouched on purpose: an outdoor
-                // campfire belongs to the night law, which dims the sky around it and not it.
-                //
-                // And so is the DAYLIGHT FIXTURE ([`super::DaylightFixture`]) — an interior-lane
-                // entry that IS the sun standing in a doorway. A sunlit opening must not dim with
-                // the room's candles: this dial means "how dark is the CANDLELIGHT". Nor does
-                // `nightGain` claim it instead — that one dims the night, and a daylight fixture is
-                // already scaled to nothing by its own day envelope (`daylight_target`'s `sun_w`,
-                // the same curve) by the time the night dim is at full strength.
-                // MONKEY (lava light): lava borrows the caster exclusion, not the sun's gain exemption.
-                let daylight = daylight.is_some_and(|f| f.how != super::DaylightHow::Lava);
-                let rgb = if interior && !daylight {
-                    rgb.map(|c| c * dynamic_interiors.interior_gain)
-                } else {
-                    rgb
-                };
-                // A fixture's reach is its authored MOLT end where there is one and the M2 bucket
-                // otherwise, with a fail-open default for a MOLT record whose end is absent or
-                // degenerate (a few author 0 with `useAtten` clear).
-                let lane = if interior {
-                    let r = reach
-                        .map(|r| r.0)
-                        .filter(|r| *r > 0.5)
-                        .unwrap_or_else(|| m2_light_reach(base));
-                    interior_reach(r, dynamic_interiors.atten_scale)
-                } else {
-                    0.0
-                };
-                // MONKEY (room gate): the fixture's claim set, resolved HERE because this is the
-                // one place that already knows both the rooms and the interior verdict. An
-                // EXTERIOR-lane light is never read by the gate, so it packs the ungated head.
-                let claim = if interior && dynamic_interiors.room_gate {
-                    RoomClaim::build(rooms, lit_rooms)
-                } else {
-                    RoomClaim::UNGATED
-                };
-                let lit_n = lit_rooms.map_or(0, |l| l.rooms.groups.len());
-                (d2, p, pl.range, rgb, synthetic, lane, claim, lit_n)
-            })
-        })
+                    // A fixture's reach is its authored MOLT end where there is one and the M2 bucket
+                    // otherwise, with a fail-open default for a MOLT record whose end is absent or
+                    // degenerate (a few author 0 with `useAtten` clear).
+                    let lane = if interior {
+                        let r = reach
+                            .map(|r| r.0)
+                            .filter(|r| *r > 0.5)
+                            .unwrap_or_else(|| m2_light_reach(base));
+                        interior_reach(r, dynamic_interiors.atten_scale)
+                    } else {
+                        0.0
+                    };
+                    // MONKEY (room gate): the fixture's claim set, resolved HERE because this is the
+                    // one place that already knows both the rooms and the interior verdict. An
+                    // EXTERIOR-lane light is never read by the gate, so it packs the ungated head.
+                    let claim = if interior && dynamic_interiors.room_gate {
+                        RoomClaim::build(rooms, lit_rooms)
+                    } else {
+                        RoomClaim::UNGATED
+                    };
+                    let lit_n = lit_rooms.map_or(0, |l| l.rooms.groups.len());
+                    (d2, p, pl.range, rgb, synthetic, lane, claim, lit_n)
+                })
+            },
+        )
         .collect();
     pts.sort_by(|a, b| a.0.total_cmp(&b.0));
     // MONKEY (ext light k8): 255, not 256 — index 255 is the shaders' `EXT_SEL_EMPTY` sentinel now
@@ -1659,9 +1749,11 @@ fn build_light_data(
     // Entries past the count are stale in the point table by design (the count row guards every
     // reader) — but the claim table is read at the SAME index, so a stale head there would gate a
     // live light with a dead building's identity. Clear the tail instead of trusting the count.
-    for slot in claims.0[pts.len() * ROOM_CLAIM_STRIDE..].iter_mut() {
+    for slot in claims.0[pts.len() * ROOM_CLAIM_STRIDE..ROOM_INDEX_BASE].iter_mut() {
         *slot = 0;
     }
+    // MONKEY (room light lists): the index over the records just written.
+    build_room_index(&mut claims.0[..], pts.len(), |i| pts[i].5 > 0.5);
     // `WOW_POINTS_DUMP=1` prints the nearest 8 packed lights once a second; `=frame` every frame,
     // which a pool that changes frame to frame needs.
     static POINTS_DUMP: std::sync::OnceLock<Option<std::ffi::OsString>> =
@@ -1829,7 +1921,12 @@ pub fn classify_light_lanes(
     streamer: Res<crate::terrain_stream::TerrainStreamer>,
     adt_tiles: Res<Assets<benilla_assets::AdtTile>>,
     lights: Query<
-        (Entity, &GlobalTransform, Option<&LightRooms>, Option<&LightLane>),
+        (
+            Entity,
+            &GlobalTransform,
+            Option<&LightRooms>,
+            Option<&LightLane>,
+        ),
         (
             With<WorldPointLight>,
             Without<ShadowProxyLight>,
@@ -1860,11 +1957,8 @@ pub fn classify_light_lanes(
         // the anchor is not a DOWN-ray hit (the same buried-terrain rule as down_ray_claim).
         let probe = gt.translation() + Vec3::Y * crate::wmo_portal::POSITION_PROBE_LIFT;
         let terrain_hit = matches!(verdict, crate::wmo_portal::IndoorVerdict::Outdoors)
-            && crate::terrain_stream::terrain_height_under(
-                &streamer,
-                &adt_tiles,
-                probe,
-            ).is_some_and(|height| height <= probe.y);
+            && crate::terrain_stream::terrain_height_under(&streamer, &adt_tiles, probe)
+                .is_some_and(|height| height <= probe.y);
         let interior = light_verdict_interior(&verdict, terrain_hit, rooms.is_some());
         let want = LightLane {
             interior,
@@ -1910,19 +2004,197 @@ fn upload_light(
 mod tests {
     use super::*;
 
+    /// MONKEY (room light lists): the shader's `room_index_find`, mirrored, over a built table.
+    fn find_room(words: &[u32], instance: u32, key: u32) -> (usize, usize) {
+        let mut slot = room_index_hash(instance, key);
+        for _ in 0..ROOM_INDEX_SLOTS {
+            let e = &words[ROOM_INDEX_BASE + 4 * slot..][..4];
+            if e[0] == 0 {
+                break;
+            }
+            if e[0] == instance && e[1] == key {
+                return (e[2] as usize, e[3] as usize);
+            }
+            slot = (slot + 1) & (ROOM_INDEX_SLOTS - 1);
+        }
+        (0, 0)
+    }
+
+    /// MONKEY (room light lists): the shader's merge walk, mirrored — the lights a fragment with
+    /// room key `(instance, key)` visits, in the order it visits them.
+    fn walk_room(words: &[u32], instance: u32, key: u32, strict: bool) -> Vec<u32> {
+        let (offset, n) = find_room(words, instance, key);
+        let room = &words[ROOM_LIST_BASE + offset..][..n];
+        let open_n = if strict {
+            0
+        } else {
+            words[ROOM_UNCLAIMED_BASE] as usize
+        };
+        let open = &words[ROOM_UNCLAIMED_BASE + 1..][..open_n];
+        let (mut a, mut b, mut out) = (0, 0, Vec::new());
+        while a < room.len() || b < open.len() {
+            let ra = room.get(a).copied().unwrap_or(u32::MAX);
+            let ob = open.get(b).copied().unwrap_or(u32::MAX);
+            if ra < ob {
+                out.push(ra);
+                a += 1;
+            } else {
+                out.push(ob);
+                b += 1;
+            }
+        }
+        out
+    }
+
+    /// MONKEY (room light lists): what the full loop can give a non-zero weight — the shader's
+    /// lane test plus `interior_room_admits`' arms for a fragment WITH a room key, before the
+    /// per-claim fade (which only ever lowers an admitted weight).
+    fn admissible(
+        words: &[u32],
+        interior: &[bool],
+        i: usize,
+        instance: u32,
+        key: u32,
+        strict: bool,
+    ) -> bool {
+        let r = &words[i * ROOM_CLAIM_STRIDE..][..ROOM_CLAIM_STRIDE];
+        if !interior[i] {
+            return false;
+        }
+        if r[1] == 0 {
+            return !strict;
+        }
+        if r[0] != instance {
+            return false;
+        }
+        r[2..2 + (r[1] as usize).min(ROOM_CLAIM_MAX)]
+            .iter()
+            .any(|c| c & 0xffff == key && (!strict || c & CLAIM_EXT_OK != 0))
+    }
+
+    /// The room index is an exact pre-filter of the full loop: for every room key a fragment can
+    /// carry, it visits every fixture the loop could admit, in ascending order (the order the full
+    /// loop sums in), exactly once. A miss would black out a fixture's pool in one room; an order
+    /// change would move the summed light by rounding; a duplicate would double a pool.
+    #[test]
+    fn the_room_index_visits_every_admissible_fixture_in_table_order() {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = |m: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % u64::from(m)) as u32
+        };
+        for round in 0..40 {
+            let mut words = vec![0u32; ROOM_TABLE_WORDS];
+            let count = if round == 0 {
+                MAX_POINT_LIGHTS
+            } else {
+                1 + next(MAX_POINT_LIGHTS as u32) as usize
+            };
+            let mut interior = vec![false; MAX_POINT_LIGHTS];
+            for i in 0..count {
+                interior[i] = next(5) != 0;
+                let r = &mut words[i * ROOM_CLAIM_STRIDE..][..ROOM_CLAIM_STRIDE];
+                if next(4) == 0 {
+                    continue; // unclaimed: count 0
+                }
+                r[0] = 1 + next(3); // three buildings, so instances collide across lights
+                let n = 1 + next(ROOM_CLAIM_MAX as u32) as usize;
+                r[1] = n as u32;
+                for k in 0..n {
+                    // Few groups, so rooms share fixtures; the EXT bit and entry byte vary.
+                    let key = 1 + next(8);
+                    r[2 + k] = key
+                        | if next(2) == 0 { CLAIM_EXT_OK } else { 0 }
+                        | next(256) << CLAIM_ENTRY_SHIFT;
+                }
+            }
+            build_room_index(&mut words, count, |i| interior[i]);
+            for instance in 0..=4u32 {
+                for key in 1..=10u32 {
+                    for strict in [false, true] {
+                        let visited = walk_room(&words, instance, key, strict);
+                        assert!(
+                            visited.windows(2).all(|w| w[0] < w[1]),
+                            "ascending, no repeats"
+                        );
+                        assert!(visited
+                            .iter()
+                            .all(|&i| (i as usize) < count && interior[i as usize]));
+                        for i in 0..count {
+                            if admissible(&words, &interior, i, instance, key, strict) {
+                                assert!(
+                                    visited.contains(&(i as u32)),
+                                    "round {round}: room ({instance}, {key}) strict {strict} misses light {i}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The room index's layout and hash are declared twice; `static_gx.wgsl` must read the table
+    /// the packer writes.
+    #[test]
+    fn the_room_index_layout_matches_the_shader() {
+        let src = include_str!("../shaders/static_gx.wgsl");
+        for (name, value) in [
+            ("ROOM_INDEX_SLOTS", ROOM_INDEX_SLOTS),
+            ("ROOM_INDEX_BASE", ROOM_INDEX_BASE),
+            ("ROOM_UNCLAIMED_BASE", ROOM_UNCLAIMED_BASE),
+            ("ROOM_LIST_BASE", ROOM_LIST_BASE),
+        ] {
+            let decl = format!("const {name}: u32 = {value}u;");
+            assert!(src.contains(&decl), "static_gx.wgsl lacks `{decl}`");
+        }
+        for line in [
+            "var h = (room_inst * 0x9E3779B1u) ^ (room_group * 0x85EBCA77u);",
+            "h = h ^ (h >> 15u);",
+        ] {
+            assert!(
+                src.contains(line),
+                "static_gx.wgsl's room_index_hash drifted: `{line}`"
+            );
+        }
+        assert_eq!(room_claim_bytes(), (ROOM_TABLE_WORDS * 4) as u64);
+    }
+
     // MONKEY (review fixes): a reference cannot override resolved terrain or an outdoor WMO
     // face. An empty ray still preserves the old rule until residency supplies real evidence.
     #[test]
     fn light_lanes_distinguish_resolved_outdoors_from_an_empty_ray() {
         use crate::wmo_portal::IndoorVerdict;
         for has_rooms in [false, true] {
-            assert!(!light_verdict_interior(&IndoorVerdict::Outdoors, true, has_rooms));
-            assert!(!light_verdict_interior(&IndoorVerdict::OutdoorsOnWmo, false, has_rooms));
-            assert!(light_verdict_interior(&IndoorVerdict::DayNight, true, has_rooms));
-            assert!(light_verdict_interior(
-                &IndoorVerdict::Baked { mocv: [0; 3], lobes: Vec::new() }, false, has_rooms,
+            assert!(!light_verdict_interior(
+                &IndoorVerdict::Outdoors,
+                true,
+                has_rooms
             ));
-            assert_eq!(light_verdict_interior(&IndoorVerdict::Outdoors, false, has_rooms), has_rooms);
+            assert!(!light_verdict_interior(
+                &IndoorVerdict::OutdoorsOnWmo,
+                false,
+                has_rooms
+            ));
+            assert!(light_verdict_interior(
+                &IndoorVerdict::DayNight,
+                true,
+                has_rooms
+            ));
+            assert!(light_verdict_interior(
+                &IndoorVerdict::Baked {
+                    mocv: [0; 3],
+                    lobes: Vec::new()
+                },
+                false,
+                has_rooms,
+            ));
+            assert_eq!(
+                light_verdict_interior(&IndoorVerdict::Outdoors, false, has_rooms),
+                has_rooms
+            );
         }
     }
 
@@ -1941,20 +2213,31 @@ mod tests {
         assert_eq!(moon_combine(0.2, 1.0, 0.35, 0.0), 1.0);
         assert_eq!(moon_combine(0.2, 0.0, 0.35, 0.0), 0.2 * (1.0 - 0.35));
         for (sky, point) in [(0.2f32, 0.0f32), (0.2, 1.0), (1.2, 0.1)] {
-            assert_eq!(moon_combine(sky, point, 0.0, 0.0).to_bits(),
-                (sky + point).clamp(0.0, 1.0).to_bits());
-            assert_eq!(moon_combine(sky, point, 0.35, 1.0).to_bits(),
-                (sky + point).clamp(0.0, 1.0).to_bits());
+            assert_eq!(
+                moon_combine(sky, point, 0.0, 0.0).to_bits(),
+                (sky + point).clamp(0.0, 1.0).to_bits()
+            );
+            assert_eq!(
+                moon_combine(sky, point, 0.35, 1.0).to_bits(),
+                (sky + point).clamp(0.0, 1.0).to_bits()
+            );
         }
     }
 
     // MONKEY (moon shadows): exercise the REAL state machine, including delayed acknowledgement
     // (new rig's deferred spawn), the propagation hold, and frame-rate-independent monotone ramp.
     fn assert_shadow_transition(state: &mut ShadowHandover, body: ShadowBody, strength: f32) {
-        let (sun, moon) = if body == ShadowBody::Sun { (1.0, 0.0) } else { (0.0, 1.0) };
+        let (sun, moon) = if body == ShadowBody::Sun {
+            (1.0, 0.0)
+        } else {
+            (0.0, 1.0)
+        };
         for _ in 0..3 {
             state.request(sun, moon, strength, true, 1.0 / 60.0);
-            assert_eq!(state.weight, 0.0, "no acknowledgement: wrong/absent basis must not cast");
+            assert_eq!(
+                state.weight, 0.0,
+                "no acknowledgement: wrong/absent basis must not cast"
+            );
         }
         state.aim_written(body);
         assert_eq!(state.weight, 0.0, "transform-write frame");
@@ -1968,7 +2251,14 @@ mod tests {
             assert!((state.weight.abs() - previous) <= 1.0 / 90.0 + 1e-6);
             previous = state.weight.abs();
         }
-        assert_eq!(state.weight, if body == ShadowBody::Sun { 1.0 } else { -strength });
+        assert_eq!(
+            state.weight,
+            if body == ShadowBody::Sun {
+                1.0
+            } else {
+                -strength
+            }
+        );
     }
 
     #[test]
@@ -2160,7 +2450,11 @@ mod tests {
         // Entity index 0 is the "terrain cell / no building" sentinel in the shader's identity
         // lane, so the packer fails OPEN on it — burn it, then take a real index.
         let zeroth = world.spawn_empty().id();
-        assert_eq!(zeroth.index().index(), 0, "the first index really is the sentinel");
+        assert_eq!(
+            zeroth.index().index(),
+            0,
+            "the first index really is the sentinel"
+        );
         let inst = world.spawn_empty().id();
         let rooms = LightRooms(crate::wmo_portal::WmoGroupVis {
             instance: inst,
@@ -2170,7 +2464,7 @@ mod tests {
         // more its box holds (g7) — its own order, which the packer must not reshuffle.
         let lit = LightLitRooms {
             rooms: crate::wmo_portal::WmoGroupVis {
-            instance: inst,
+                instance: inst,
                 groups: std::sync::Arc::from([5u16, 4, 7]),
             },
             // MONKEY (soft portal claims): no fades — every claim is HARD, which is the packer's
@@ -2179,14 +2473,26 @@ mod tests {
         };
 
         let claim = RoomClaim::build(Some(&rooms), Some(&lit));
-        assert_eq!(claim.instance, inst.index().index(), "keyed to the placement");
+        assert_eq!(
+            claim.instance,
+            inst.index().index(),
+            "keyed to the placement"
+        );
         assert_eq!(claim.n, 3, "the spawner's list, verbatim: {claim}");
-        assert_eq!(&claim.groups[..3], &[5, 4, 7], "in the spawner's priority order");
+        assert_eq!(
+            &claim.groups[..3],
+            &[5, 4, 7],
+            "in the spawner's priority order"
+        );
 
         let mut gpu = [0u32; ROOM_CLAIM_STRIDE];
         claim.write(&mut gpu);
         assert_eq!(gpu[1], 3, "the count the shader loops to");
-        assert_eq!(ROOM_CLAIM_FADE, 2 + ROOM_CLAIM_MAX, "the fades start after the id block");
+        assert_eq!(
+            ROOM_CLAIM_FADE,
+            2 + ROOM_CLAIM_MAX,
+            "the fades start after the id block"
+        );
         // `group + 1`, so the shader can keep 0 for "empty" / "this fragment names no room" —
         // group 0 is a real, common group id and could not be its own sentinel. MONKEY (portal
         // claims): plus the positive exterior-lane bit, since none of these carries the deny flag.
@@ -2199,10 +2505,17 @@ mod tests {
             ],
             "claims stored + 1, exterior-lane eligible, at full entry weight"
         );
-        assert_eq!(&gpu[5..ROOM_CLAIM_FADE], &[0, 0, 0], "padding stays empty, not a claim on g0");
+        assert_eq!(
+            &gpu[5..ROOM_CLAIM_FADE],
+            &[0, 0, 0],
+            "padding stays empty, not a claim on g0"
+        );
         // MONKEY (soft portal claims): no fades supplied ⇒ every record is zero, and `radius == 0`
         // is the HARD claim the shader reads as weight 1 everywhere.
-        assert!(gpu[ROOM_CLAIM_FADE..].iter().all(|w| *w == 0), "hard claims write no fade");
+        assert!(
+            gpu[ROOM_CLAIM_FADE..].iter().all(|w| *w == 0),
+            "hard claims write no fade"
+        );
 
         // MONKEY (review fixes): containment claims must pack identically with NO MOLR. This
         // used to discard the whole list and let one fixture light every room in the building.
@@ -2215,7 +2528,7 @@ mod tests {
         // bit — the one thing that keeps a tavern candle off the street outside.
         let shell = LightLitRooms {
             rooms: crate::wmo_portal::WmoGroupVis {
-            instance: inst,
+                instance: inst,
                 groups: std::sync::Arc::from([5u16, 9 | LIT_ROOM_EXT_DENY]),
             },
             fades: std::sync::Arc::from([]),
@@ -2261,14 +2574,22 @@ mod tests {
         let many: Vec<u16> = (0..ROOM_CLAIM_MAX as u16 + 1).collect();
         let big = LightLitRooms {
             rooms: crate::wmo_portal::WmoGroupVis {
-            instance: inst,
+                instance: inst,
                 groups: std::sync::Arc::from(&many[..]),
             },
             fades: std::sync::Arc::from([]),
         };
         let packed = RoomClaim::build(Some(&rooms), Some(&big));
-        assert_eq!(usize::from(packed.n), ROOM_CLAIM_MAX, "overflow truncates to the cap");
-        assert_eq!(&packed.groups[..], &many[..ROOM_CLAIM_MAX], "keeps the head, drops the tail");
+        assert_eq!(
+            usize::from(packed.n),
+            ROOM_CLAIM_MAX,
+            "overflow truncates to the cap"
+        );
+        assert_eq!(
+            &packed.groups[..],
+            &many[..ROOM_CLAIM_MAX],
+            "keeps the head, drops the tail"
+        );
     }
 
     /// GOLDEN — MONKEY (soft portal claims): the fade half of the GPU record, by byte offset.
@@ -2309,11 +2630,27 @@ mod tests {
         assert_eq!(f32::from_bits(gpu[f]), -1234.5);
         assert_eq!(f32::from_bits(gpu[f + 1]), 60.25);
         assert_eq!(f32::from_bits(gpu[f + 2]), 7000.0);
-        assert_eq!(gpu[f + 3] & 0xffff, (6.25 * CLAIM_FADE_SCALE) as u32, "radius, low half");
-        assert_eq!(gpu[f + 3] >> 16, (1.5 * CLAIM_FADE_SCALE) as u32, "slack, high half");
+        assert_eq!(
+            gpu[f + 3] & 0xffff,
+            (6.25 * CLAIM_FADE_SCALE) as u32,
+            "radius, low half"
+        );
+        assert_eq!(
+            gpu[f + 3] >> 16,
+            (1.5 * CLAIM_FADE_SCALE) as u32,
+            "slack, high half"
+        );
         // The entry weight rides the ID word's spare bits, not the fade record.
-        assert_eq!((gpu[3] >> CLAIM_ENTRY_SHIFT) & 0xff, 102, "0.4 x 255, on the soft claim");
-        assert_eq!((gpu[2] >> CLAIM_ENTRY_SHIFT) & 0xff, 255, "full, on the hard one");
+        assert_eq!(
+            (gpu[3] >> CLAIM_ENTRY_SHIFT) & 0xff,
+            102,
+            "0.4 x 255, on the soft claim"
+        );
+        assert_eq!(
+            (gpu[2] >> CLAIM_ENTRY_SHIFT) & 0xff,
+            255,
+            "full, on the hard one"
+        );
         // Every slot past the count is literally empty — a stale fade would follow a live light.
         assert!(gpu[ROOM_CLAIM_FADE + 8..].iter().all(|w| *w == 0));
         assert_eq!(gpu.len(), ROOM_CLAIM_STRIDE, "2 head + 6 ids + 6 x 4 fade");
@@ -2367,7 +2704,10 @@ mod tests {
         app.update();
         let data = app.world().resource::<WowLightData>().0;
         assert_eq!(data.points[3], [0.0, 0.0, 0.0, 0.0], "gain 0 = lane off");
-        assert!((data.points[1][0] - 2.0).abs() < 1e-4, "authored unaffected");
+        assert!(
+            (data.points[1][0] - 2.0).abs() < 1e-4,
+            "authored unaffected"
+        );
         assert_eq!(
             app.world().resource::<ResolvedPointLights>().as_slice()[1].color,
             Vec3::ZERO,
@@ -2422,7 +2762,11 @@ mod tests {
         app.world_mut().insert_resource(SpellLightGain(0.0));
         app.update();
         let data = app.world().resource::<WowLightData>().0;
-        assert_eq!(data.points[3], [0.0, 0.0, 0.0, 0.0], "spell gain 0 = spell lights off");
+        assert_eq!(
+            data.points[3],
+            [0.0, 0.0, 0.0, 0.0],
+            "spell gain 0 = spell lights off"
+        );
         assert!(
             (data.points[1][0] - 1.0).abs() < 1e-4,
             "the campfire still burns at its own gain"
@@ -2453,7 +2797,10 @@ mod tests {
         let mut app = packer_app();
         // Same recipe, same lane, same intensity: only the component can separate them.
         let recipe = || crate::terrain_stream::point_light([1.0, 0.5, 0.25], 1.5);
-        let lane = LightLane { interior: true, generation: LightLane::SETTLED };
+        let lane = LightLane {
+            interior: true,
+            generation: LightLane::SETTLED,
+        };
         app.world_mut()
             .spawn((recipe(), GlobalTransform::from_translation(Vec3::X), lane));
         app.world_mut().spawn((
@@ -2465,20 +2812,36 @@ mod tests {
 
         let (mut moved, mut steady_moved) = (0.0f32, 0.0f32);
         let first = at(&mut app, 0);
-        let (base_steady, base_flame, reach) = (first.points[1][0], first.points[3][0], first.points[3][3]);
-        assert!(reach > 0.5, "the flame is on the interior lane, so `.w` carries its reach");
+        let (base_steady, base_flame, reach) =
+            (first.points[1][0], first.points[3][0], first.points[3][3]);
+        assert!(
+            reach > 0.5,
+            "the flame is on the interior lane, so `.w` carries its reach"
+        );
         for ms in (40..4000).step_by(37) {
             let d = at(&mut app, ms);
             steady_moved = steady_moved.max((d.points[1][0] - base_steady).abs());
             moved = moved.max((d.points[3][0] - base_flame).abs() / base_flame.max(1e-6));
-            assert_eq!(d.points[3][3], reach, "the packed reach never moves with the flicker");
-            assert_eq!(d.points[2], first.points[2], "nor does the position/range row");
+            assert_eq!(
+                d.points[3][3], reach,
+                "the packed reach never moves with the flicker"
+            );
+            assert_eq!(
+                d.points[2], first.points[2],
+                "nor does the position/range row"
+            );
         }
-        assert_eq!(steady_moved, 0.0, "a light with no FlameFlicker is a constant, as before");
+        assert_eq!(
+            steady_moved, 0.0,
+            "a light with no FlameFlicker is a constant, as before"
+        );
         assert!(moved > 0.02, "the flame barely moved at all: {moved}");
         // Both endpoints of the excursion are inside the torch rung's authored +-10%, doubled by
         // the two-sided base sample (the reference frame is t=0, itself off the mean).
-        assert!(moved < 2.0 * FlameKind::Torch.amplitude(), "over amplitude: {moved}");
+        assert!(
+            moved < 2.0 * FlameKind::Torch.amplitude(),
+            "over amplitude: {moved}"
+        );
 
         // `fireFlicker 0` is the off switch: the flame commits the same bytes on every frame.
         app.world_mut().insert_resource(DynamicInteriors {
@@ -2487,7 +2850,11 @@ mod tests {
         });
         let off = at(&mut app, 5000).points[3];
         for ms in [5100u64, 5250, 5600] {
-            assert_eq!(at(&mut app, ms).points[3], off, "gain 0 = the pre-feature constant");
+            assert_eq!(
+                at(&mut app, ms).points[3],
+                off,
+                "gain 0 = the pre-feature constant"
+            );
         }
     }
 
@@ -2732,12 +3099,19 @@ mod tests {
     /// `LightStd430` is mirrored by three shaders plus the portrait booth's frozen studio blob.
     #[test]
     fn the_live_point_cap_leaves_the_sentinel_index_free() {
-        assert_eq!(MAX_LIVE_POINT_LIGHTS, 255, "255 is EXT_SEL_EMPTY in the three shaders");
+        assert_eq!(
+            MAX_LIVE_POINT_LIGHTS, 255,
+            "255 is EXT_SEL_EMPTY in the three shaders"
+        );
         assert_eq!(MAX_LIVE_POINT_LIGHTS, MAX_POINT_LIGHTS - 1);
         // 21 header rows + 2 x 256 point rows, 16 B each.
         // MONKEY (p0 MonkeyFrame): the fixed rows plus the 256-byte programme block.
         // GFX (moonlight): + the moonlight row (17 programme rows, 272 B).
-        assert_eq!(per_frame_blob_bytes(), 8800, "the mirrored blob must not change size");
+        assert_eq!(
+            per_frame_blob_bytes(),
+            8800,
+            "the mirrored blob must not change size"
+        );
     }
 
     /// MONKEY (reviewfix): the shader mirrors use literal storage-array lengths and water reads
@@ -2792,7 +3166,10 @@ mod tests {
         for debug in 0..=4u32 {
             for daylight in [0.0f32, 0.01, 0.12, 0.5, 0.999, 1.0] {
                 let w = 1.0 + debug as f32 + daylight * DAYLIGHT_LANE_SCALE;
-                assert!(interiors_on(w), "lane off at debug {debug} daylight {daylight}");
+                assert!(
+                    interiors_on(w),
+                    "lane off at debug {debug} daylight {daylight}"
+                );
                 assert_eq!(idbg(w), debug, "debug decode moved (w {w})");
                 assert!(
                     (daylight_of(w) - daylight).abs() < 1e-4,
@@ -2813,7 +3190,11 @@ mod tests {
             }
         };
         assert_eq!(pack(false, 3, 0.5), 0.0);
-        assert_eq!(idbg(pack(true, 3, 5.0)), 3, "an out-of-range cvar must still clamp under 0.5");
+        assert_eq!(
+            idbg(pack(true, 3, 5.0)),
+            3,
+            "an out-of-range cvar must still clamp under 0.5"
+        );
         assert!((daylight_of(pack(true, 3, 5.0)) - 1.0).abs() < 1e-4);
         assert!((daylight_of(pack(true, 0, -1.0))).abs() < 1e-4);
     }
@@ -2890,7 +3271,8 @@ mod tests {
             });
             // MONKEY (moon shadows): this gain test models an already-settled sun rig; the
             // packer now consumes its publication instead of manufacturing a clock-only weight.
-            app.world_mut().resource_mut::<ShadowHandover>().weight = sun_shadow_strength(celestial_y);
+            app.world_mut().resource_mut::<ShadowHandover>().weight =
+                sun_shadow_strength(celestial_y);
             // An EXTERIOR fire, to prove the dial stops at the sky law.
             app.world_mut().spawn((
                 crate::terrain_stream::point_light([1.0, 0.5, 0.25], 2.0),
@@ -2902,25 +3284,59 @@ mod tests {
 
         let day = pack(1.0);
         assert_eq!(day.rows[5][2], 1.0, "the sun is up: night_w is 0");
-        assert_eq!([day.rows[0][0], day.rows[0][1], day.rows[0][2]], base.ambient);
-        assert_eq!([day.rows[1][0], day.rows[1][1], day.rows[1][2]], base.diffuse);
+        assert_eq!(
+            [day.rows[0][0], day.rows[0][1], day.rows[0][2]],
+            base.ambient
+        );
+        assert_eq!(
+            [day.rows[1][0], day.rows[1][1], day.rows[1][2]],
+            base.diffuse
+        );
         assert_eq!([day.rows[3][0], day.rows[3][1], day.rows[3][2]], base.spec);
         // The SH block is derived from the same triple — its DC lanes carry ambient verbatim.
-        assert_eq!(day.rows[6][3], base.ambient[0], "the SH DC is undimmed by day too");
+        assert_eq!(
+            day.rows[6][3], base.ambient[0],
+            "the SH DC is undimmed by day too"
+        );
 
         let night = pack(0.0);
         assert_eq!(night.rows[5][2], 0.0, "below the horizon: night_w is 1");
         let g = DynamicInteriors::default().night_gain;
-        assert_eq!(g, 0.45, "the shipped default is the director's pick (2026-09-11: 0.45)");
+        assert_eq!(
+            g, 0.45,
+            "the shipped default is the director's pick (2026-09-11: 0.45)"
+        );
         for c in 0..3 {
-            assert_eq!(night.rows[0][c], base.ambient[c] * g, "ambient takes the gain");
-            assert_eq!(night.rows[1][c], base.diffuse[c] * g, "diffuse takes the gain");
-            assert_eq!(night.rows[3][c], base.spec[c] * g, "the sun halo follows its sun");
+            assert_eq!(
+                night.rows[0][c],
+                base.ambient[c] * g,
+                "ambient takes the gain"
+            );
+            assert_eq!(
+                night.rows[1][c],
+                base.diffuse[c] * g,
+                "diffuse takes the gain"
+            );
+            assert_eq!(
+                night.rows[3][c],
+                base.spec[c] * g,
+                "the sun halo follows its sun"
+            );
         }
-        assert_eq!(night.rows[6][3], base.ambient[0] * g, "the SH DC follows the triple");
+        assert_eq!(
+            night.rows[6][3],
+            base.ambient[0] * g,
+            "the SH DC follows the triple"
+        );
         // The fire is the same brightness on both frames — which is the point of the feature.
-        assert_eq!(day.points[1], night.points[1], "a point light never takes the night dim");
-        assert!((night.points[1][0] - 2.0).abs() < 1e-4, "…at its authored value");
+        assert_eq!(
+            day.points[1], night.points[1],
+            "a point light never takes the night dim"
+        );
+        assert!(
+            (night.points[1][0] - 2.0).abs() < 1e-4,
+            "…at its authored value"
+        );
     }
 
     /// GOLDEN — MONKEY (moon shadows): THE HAND-OVER LAW, swept over the whole game day against
@@ -2990,8 +3406,14 @@ mod tests {
             prev_sun = sun;
             prev_moon = moon;
         }
-        assert!(sun_minutes > 600, "the sun should cast most of the day: {sun_minutes} min");
-        assert!(moon_minutes > 200, "the moon should cast most of the night: {moon_minutes} min");
+        assert!(
+            sun_minutes > 600,
+            "the sun should cast most of the day: {sun_minutes} min"
+        );
+        assert!(
+            moon_minutes > 200,
+            "the moon should cast most of the night: {moon_minutes} min"
+        );
         assert!(
             dark_minutes > 60,
             "the sun sets ~1h45m before the moon rises — the oval blob owns that window, and a \
@@ -3065,7 +3487,10 @@ mod tests {
         // Midnight: the sun is 10 degrees under, the white moon is overhead (+55 degrees).
         let sun_h = super::super::daynight::celestial_sun_direction(0.0).y;
         let moon_h = super::super::daynight::moon_direction(0.0).y;
-        assert!(sun_h < 0.0 && moon_h > 0.3, "midnight: sun down, moon high ({sun_h}, {moon_h})");
+        assert!(
+            sun_h < 0.0 && moon_h > 0.3,
+            "midnight: sun down, moon high ({sun_h}, {moon_h})"
+        );
         let pack = |strength: f32| {
             let mut app = packer_app();
             app.world_mut().insert_resource(WowLighting {
@@ -3073,10 +3498,15 @@ mod tests {
                 moon_dir_white: Vec3::new(0.0, moon_h, 0.0),
                 ..default()
             });
-            app.world_mut().insert_resource(MoonShadowStrength(strength));
+            app.world_mut()
+                .insert_resource(MoonShadowStrength(strength));
             let mut handover = app.world_mut().resource_mut::<ShadowHandover>();
             handover.request(0.0, 1.0, strength, true, 0.0);
-            handover.aim_written(if strength > 0.0 { ShadowBody::Moon } else { ShadowBody::Sun });
+            handover.aim_written(if strength > 0.0 {
+                ShadowBody::Moon
+            } else {
+                ShadowBody::Sun
+            });
             handover.request(0.0, 1.0, strength, true, 0.0);
             handover.request(0.0, 1.0, strength, true, 1.5);
             app.update();
@@ -3128,9 +3558,15 @@ mod tests {
         let mut app = packer_app();
         // One recipe, one lane component apart: nothing else can separate the two entries.
         let recipe = || crate::terrain_stream::point_light([1.0, 0.5, 0.25], 2.0);
-        let lane = |interior| LightLane { interior, generation: LightLane::SETTLED };
-        app.world_mut()
-            .spawn((recipe(), GlobalTransform::from_translation(Vec3::X), lane(true)));
+        let lane = |interior| LightLane {
+            interior,
+            generation: LightLane::SETTLED,
+        };
+        app.world_mut().spawn((
+            recipe(),
+            GlobalTransform::from_translation(Vec3::X),
+            lane(true),
+        ));
         app.world_mut().spawn((
             recipe(),
             GlobalTransform::from_translation(Vec3::new(2.0, 0.0, 0.0)),
@@ -3165,12 +3601,23 @@ mod tests {
 
         let data = app.world().resource::<WowLightData>().0;
         assert_eq!(data.rows[20][0], 3.0, "all three packed");
-        assert_eq!(data.rows[20][1], 0.2 * g, "the base ambient floor takes the gain");
-        assert_eq!(data.rows[20][2], 0.5 * g, "the per-fixture fill takes the gain");
+        assert_eq!(
+            data.rows[20][1],
+            0.2 * g,
+            "the base ambient floor takes the gain"
+        );
+        assert_eq!(
+            data.rows[20][2],
+            0.5 * g,
+            "the per-fixture fill takes the gain"
+        );
         assert_eq!(data.rows[20][3], 3.0, "exposure stays the user's own dial");
         // Nearest-first: the interior fixture at x=1 is entry 0, the exterior one at x=2 entry 1.
         let (int, ext) = (data.points[1], data.points[3]);
-        assert!(int[3] > 0.5 && ext[3] == 0.0, "the lanes packed as expected: {int:?} {ext:?}");
+        assert!(
+            int[3] > 0.5 && ext[3] == 0.0,
+            "the lanes packed as expected: {int:?} {ext:?}"
+        );
         assert!(
             (int[0] - 2.0 * g).abs() < 1e-4,
             "the interior fixture's colour takes the gain: {int:?}"
@@ -3180,7 +3627,10 @@ mod tests {
             "the exterior light is untouched by it: {ext:?}"
         );
         let sun = data.points[5];
-        assert!(sun[3] > 0.5, "the daylight fixture packed on the interior lane: {sun:?}");
+        assert!(
+            sun[3] > 0.5,
+            "the daylight fixture packed on the interior lane: {sun:?}"
+        );
         assert!(
             (sun[0] - 2.0).abs() < 1e-4,
             "…and a sunlit doorway does not dim with the candles: {sun:?}"

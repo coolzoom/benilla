@@ -35,7 +35,9 @@ impl Default for WaterUniform {
 pub struct WaterQuality(pub u8);
 
 impl Default for WaterQuality {
-    fn default() -> Self { Self(1) }
+    fn default() -> Self {
+        Self(1)
+    }
 }
 
 /// The world view's opaque depth, resolved to a sampleable R32Float image.
@@ -46,11 +48,15 @@ impl FromWorld for WaterDepthImage {
     fn from_world(world: &mut World) -> Self {
         use bevy::{asset::RenderAssetUsages, render::render_resource::*};
         let mut image = Image::new_fill(
-            Extent3d::default(), TextureDimension::D2, &0f32.to_le_bytes(),
-            TextureFormat::R32Float, RenderAssetUsages::default(),
+            Extent3d::default(),
+            TextureDimension::D2,
+            &0f32.to_le_bytes(),
+            TextureFormat::R32Float,
+            RenderAssetUsages::default(),
         );
         image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING
-            | TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_DST;
+            | TextureUsages::RENDER_ATTACHMENT
+            | TextureUsages::COPY_DST;
         // Render-only: no CPU copy, so a resize does not allocate (and upload) a screen of zeros.
         image.data = None;
         Self(world.resource_mut::<Assets<Image>>().add(image))
@@ -67,11 +73,15 @@ impl FromWorld for WaterColourImage {
     fn from_world(world: &mut World) -> Self {
         use bevy::{asset::RenderAssetUsages, render::render_resource::*};
         let mut image = Image::new_fill(
-            Extent3d::default(), TextureDimension::D2, &[0u8; 8],
-            TextureFormat::Rgba16Float, RenderAssetUsages::default(),
+            Extent3d::default(),
+            TextureDimension::D2,
+            &[0u8; 8],
+            TextureFormat::Rgba16Float,
+            RenderAssetUsages::default(),
         );
         image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING
-            | TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_DST;
+            | TextureUsages::RENDER_ATTACHMENT
+            | TextureUsages::COPY_DST;
         // Render-only: no CPU copy, so a resize does not allocate (and upload) a screen of zeros.
         image.data = None;
         Self(world.resource_mut::<Assets<Image>>().add(image))

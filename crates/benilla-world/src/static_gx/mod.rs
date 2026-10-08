@@ -26,17 +26,15 @@ mod shadow; // MONKEY (world shadows): CPU triangle collection for the static-wo
 mod torch_depth; // MONKEY (torch shadows Phase 1): the per-fixture depth-map render + its targets
 pub use shadow::CutoutBucket; // MONKEY (world shadows): per-leaf-texture alpha-cutout caster group
 pub use torch_depth::TorchShadowViews; // MONKEY (torch shadows Phase 1): the app→render publication
-// MONKEY (torch owner exclusion): the light→caster ownership key, written at the light spawn
-// sites (`terrain_stream::spawn`, `benilla_app::entities::carried_light`) and read by both
-// torch caster gathers, so a fixture never casts its own body's shadow into its own map.
+                                       // MONKEY (torch owner exclusion): the light→caster ownership key, written at the light spawn
+                                       // sites (`terrain_stream::spawn`, `benilla_app::entities::carried_light`) and read by both
+                                       // torch caster gathers, so a fixture never casts its own body's shadow into its own map.
 pub use torch_depth::{torch_flame_inside_bounds, LightOwner};
 // MONKEY (torch shadows Phase 3A): the shared depth image + table buffer every model material binds,
 // their startup constructor, the one-param main-world accessor, and the always-on wiring — used by
 // the asset foundation (`crate::assets`) and every material-building site; NOT gated on `enabled()`.
-pub use torch_depth::{
-    new_torch_shared, SharedTorchBuffer, TorchDepthImage, TorchShared,
-};
 pub(crate) use torch_depth::register_shared as register_torch_shared;
+pub use torch_depth::{new_torch_shared, SharedTorchBuffer, TorchDepthImage, TorchShared};
 
 /// The doodad spatial cell, a quarter ADT tile (133⅓ yd), as `terrain_stream::merge::CELL`.
 const CELL: f32 = 533.333_3 / 4.0;

@@ -42,6 +42,9 @@ bevy = { version = "0.18.1", default-features = false, features = [
 ] }
 # For the `WOW_GPU_MS` meter's query set, which bevy 0.18 does not wrap; must match bevy's wgpu.
 wgpu = "27"
+# `benilla-dlss5` uses the same raw Vulkan types as Bevy's wgpu 27 backend.
+ash = "0.38"
+libloading = "0.8"
 clap = { version = "4.6.1", features = ["derive"] }
 sha1 = "0.10.6"
 
@@ -60,7 +63,6 @@ bevy_pbr = { path = "third_party/bevy_pbr" }
 # wgpu-hal 27.0.4, its GLES slot tables widened to 32 so a layout's vertex-only textures cannot
 # overrun them (`third_party/wgpu-hal/BENILLA.md`).
 wgpu-hal = { path = "third_party/wgpu-hal" }
-
 # Dependencies at opt-level 3 in dev: at opt-level 0, avian/parry collision drops a run to <1 fps.
 [profile.dev.package."*"]
 opt-level = 3

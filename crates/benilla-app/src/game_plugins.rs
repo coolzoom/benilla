@@ -738,7 +738,16 @@ pub(crate) mod schedule_tests {
     /// MONKEY (merge upstream b396bbf6, 2026-10-02): upstream's own declarations dropped its
     /// ceiling to 4,980; the merged tree reads 4,999 = upstream 4,980 + 19 of ours (the lanes'
     /// residual pairs above, unchanged in kind). Read off the merged tree's test run.
-    const UPDATE_ACTIONABLE_CEILING: usize = 4_999;
+    ///
+    /// twow merge of everwood f5547a63: 5,016 = 4,999 + 17 from the twow systems. Read off the
+    /// merged tree's test run.
+    ///
+    /// twow merge of dlss-experimental 90f3e02b: 5,022 = 5,016 + 6. `motion_vectors::sync_debug_view`
+    /// and `view::enable_world_motion_vector_prepass` each against the two exclusive systems
+    /// (`net::apply::apply_net_updates`, `terrain_stream::collider::finish_colliders`), and
+    /// `sync_debug_view` reading `DebugState` against two of its writers (a debug toggle may land
+    /// a frame late). Read off the merged tree's dump.
+    const UPDATE_ACTIONABLE_CEILING: usize = 5_022;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

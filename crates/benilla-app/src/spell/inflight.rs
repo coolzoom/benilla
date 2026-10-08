@@ -33,31 +33,117 @@ const CAST_SLACK: Duration = Duration::from_secs(2);
 /// Cleared by the cast's resolution (`SMSG_SPELL_GO`, a failing `SMSG_CAST_RESULT`,
 /// `SMSG_SPELL_FAILED_OTHER`), keyed on the spell id, or by [`local_self_cancel`]; `deadline`
 /// covers a lost resolution.
-#[derive(Resource, Default)]
-pub(crate) struct PendingCast(Option<PendingCastState>);
+///
+/// The spell queue (`spellQueue`, benilla's own; the reference waits for the resolution): a timed
+/// cast's guard also opens at send + cast time + `spellQueueBufferMs`, so the next cast leaves on
+/// the local timer instead of one round trip later. The server's cast started half a round trip
+/// after the send, so the buffer only has to cover its tick. A cast sent early that the server
+/// refuses as in progress or not ready is sent once more, a buffer later ([`Resend`]).
+#[derive(Resource)]
+pub(crate) struct PendingCast {
+    cast: Option<PendingCastState>,
+    /// The spell id of a cast whose guard opened early and whose success echo
+    /// (`SMSG_CAST_RESULT`, then `SMSG_SPELL_GO`) is still owed; absorbed here so it cannot
+    /// resolve the cast sent after it. Dropped on its GO or on the next `SMSG_SPELL_START`.
+    released: Option<u32>,
+    /// `spellQueue`.
+    spell_queue: bool,
+    /// `spellQueueBufferMs`.
+    spell_queue_buffer: Duration,
+    /// `SpellQueueWindow`.
+    queue_window: Duration,
+    /// A player's press refused inside the window, and when it may go: one slot, a newer press
+    /// replaces it.
+    queued: Option<(crate::spell::HeldCast, Instant)>,
+    /// The press now sending came off the queue, so its cast counts as sent early.
+    firing_queued: bool,
+}
+
+/// `spellQueueBufferMs`'s registered default: nampower's 55 ms, one 50 ms server tick plus margin.
+pub(crate) const SPELL_QUEUE_BUFFER_MS: u64 = 55;
+/// `SpellQueueWindow`'s registered default, the retail client's.
+pub(crate) const SPELL_QUEUE_WINDOW_MS: u64 = 400;
+
+impl Default for PendingCast {
+    fn default() -> Self {
+        Self {
+            cast: None,
+            released: None,
+            spell_queue: false,
+            spell_queue_buffer: Duration::from_millis(SPELL_QUEUE_BUFFER_MS),
+            queue_window: Duration::from_millis(SPELL_QUEUE_WINDOW_MS),
+            queued: None,
+            firing_queued: false,
+        }
+    }
+}
+
+/// Mirrors `spellQueue`, `spellQueueBufferMs` and `SpellQueueWindow` into [`PendingCast`].
+pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut pending: ResMut<PendingCast>) {
+    let ms = || Duration::from_millis(ev.num().max(0.0) as u64);
+    if ev.is("spellQueue") {
+        pending.spell_queue = ev.flag();
+        if !pending.spell_queue {
+            pending.queued = None;
+        }
+    } else if ev.is("spellQueueBufferMs") {
+        pending.spell_queue_buffer = ms();
+    } else if ev.is("SpellQueueWindow") {
+        pending.queue_window = ms();
+    }
+}
 
 struct PendingCastState {
     spell_id: u32,
+    sent: Instant,
     deadline: Instant,
+    /// The spell queue's early open, set at `SMSG_SPELL_START` for a timed cast.
+    release: Option<Instant>,
     /// This record refuses the next press, lights the in-flight ring and gates the by-name walk:
     /// ordinary casts and item uses. The reference writes `0xceca88` for every committed cast
     /// (`0x6e5026`) and discriminates at the gate instead; a ranged shot is recorded here without
     /// guarding, so the `modalNextSpell` test (`0x6e7408`) still matches it.
     guards: bool,
+    resend: Resend,
+}
+
+/// The spell queue's one resend of a plain `CMSG_CAST_SPELL` it sent early: the server refuses
+/// a cast that lands before its last one finished (`SPELL_FAILED_SPELL_IN_PROGRESS` 0x61,
+/// `SPELL_FAILED_NOT_READY` 0x3c), and by a buffer after the refusal arrives it has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Resend {
+    /// Not sent early, or not a plain spell cast: a refusal resolves it as the reference does.
+    None,
+    /// Sent early at this target; a refusal schedules the resend.
+    Armed(Option<u64>),
+    /// Refused; the resend goes out at the instant.
+    Due(Option<u64>, Instant),
+    /// Resent once already.
+    Spent,
+}
+
+/// The server's in-progress refusal (`SPELL_FAILED_SPELL_IN_PROGRESS`).
+pub(crate) const REFUSED_IN_PROGRESS: u8 = 0x61;
+/// The server's not-ready refusal (`SPELL_FAILED_NOT_READY`).
+pub(crate) const REFUSED_NOT_READY: u8 = 0x3c;
+
+impl PendingCastState {
+    /// Guarding, inside its deadline, and not yet past the spell queue's early open.
+    fn holds(&self, now: Instant) -> bool {
+        self.guards && now < self.deadline && self.release.is_none_or(|r| now < r)
+    }
 }
 
 impl PendingCast {
     /// A guarding cast is outstanding, inside its deadline.
     pub(crate) fn in_flight(&self, now: Instant) -> bool {
-        self.0
-            .as_ref()
-            .is_some_and(|p| p.guards && now < p.deadline)
+        self.cast.as_ref().is_some_and(|p| p.holds(now))
     }
 
     /// The reference's `0xceca88`: the last committed, unresolved cast of any class, which
     /// `HandleCastResult 0x6e7330` tests at `0x6e7408` before reading `modalNextSpell`.
     pub(crate) fn committed(&self, now: Instant) -> Option<u32> {
-        self.0
+        self.cast
             .as_ref()
             .filter(|p| now < p.deadline)
             .map(|p| p.spell_id)
@@ -65,18 +151,21 @@ impl PendingCast {
 
     /// The guarding cast's spell id, which `IsCurrentAction`'s checked state keys on.
     pub(crate) fn current(&self, now: Instant) -> Option<u32> {
-        self.0
+        self.cast
             .as_ref()
-            .filter(|p| p.guards && now < p.deadline)
+            .filter(|p| p.holds(now))
             .map(|p| p.spell_id)
     }
 
     /// Arm at send, the client's `0xceca88` write; a ranged shot passes `guards = false`.
     pub(crate) fn arm(&mut self, spell_id: u32, now: Instant, guards: bool) {
-        self.0 = Some(PendingCastState {
+        self.replace(PendingCastState {
             spell_id,
+            sent: now,
             deadline: now + SEND_PROVISIONAL,
+            release: None,
             guards,
+            resend: Resend::None,
         });
     }
 
@@ -84,34 +173,193 @@ impl PendingCast {
     /// via `0x6e5a90`, so it writes the same inflight id and meets the same gate. Only the
     /// deadline differs.
     pub(crate) fn arm_item(&mut self, spell_id: u32, now: Instant) {
-        self.0 = Some(PendingCastState {
+        self.replace(PendingCastState {
             spell_id,
+            sent: now,
             deadline: now + ITEM_SEND_PROVISIONAL,
+            release: None,
             guards: true,
+            resend: Resend::None,
         });
     }
 
-    /// Tighten the deadline to the server's real cast time once `SMSG_SPELL_START` names it.
+    /// After [`Self::arm`] for a plain `CMSG_CAST_SPELL` at `target`: offer the one resend, kept
+    /// only when the cast went out over an early-opened predecessor.
+    pub(crate) fn offer_resend(&mut self, target: Option<u64>) {
+        let early = self.released.is_some() || std::mem::take(&mut self.firing_queued);
+        if let Some(p) = self.cast.as_mut().filter(|p| early && p.guards) {
+            p.resend = Resend::Armed(target);
+        }
+    }
+
+    /// A refusal of our cast as in progress or not ready: schedule the resend a buffer from now
+    /// and keep guarding, or answer false and let the refusal resolve it.
+    pub(crate) fn schedule_resend(&mut self, spell_id: u32, now: Instant) -> bool {
+        let buffer = self.spell_queue_buffer;
+        let Some(p) = self.cast.as_mut().filter(|p| p.spell_id == spell_id) else {
+            return false;
+        };
+        let Resend::Armed(target) = p.resend else {
+            return false;
+        };
+        p.resend = Resend::Due(target, now + buffer);
+        p.deadline = now + buffer + SEND_PROVISIONAL;
+        true
+    }
+
+    /// The in-flight rung's queue: a press refused while a cast guards is held for the guard's
+    /// early open when that lies inside the window. A guard with no early open (an instant
+    /// awaiting its GO, a cast before its START) names no time, and the press is refused.
+    pub(crate) fn queue_behind_cast(
+        &mut self,
+        press: crate::spell::HeldCast,
+        now: Instant,
+    ) -> bool {
+        let open = self.cast.as_ref().and_then(|p| p.release);
+        open.is_some_and(|at| self.queue(press, now, at))
+    }
+
+    /// The not-ready rung's queue: a press refused for a cooldown or the GCD ending at `at`.
+    pub(crate) fn queue_behind_cooldown(
+        &mut self,
+        press: crate::spell::HeldCast,
+        now: Instant,
+        at: Instant,
+    ) -> bool {
+        self.queue(press, now, at)
+    }
+
+    fn queue(&mut self, press: crate::spell::HeldCast, now: Instant, at: Instant) -> bool {
+        if !self.spell_queue || at.saturating_duration_since(now) > self.queue_window {
+            return false;
+        }
+        self.queued = Some((press, at));
+        true
+    }
+
+    /// The queued press whose time has come; the cast it commits counts as sent early.
+    pub(crate) fn take_due_press(&mut self, now: Instant) -> Option<crate::spell::HeldCast> {
+        let (press, at) = self.queued?;
+        if now < at {
+            return None;
+        }
+        self.queued = None;
+        self.firing_queued = true;
+        Some(press)
+    }
+
+    /// After a queued press ran the ladder, sent or refused.
+    pub(crate) fn queued_press_done(&mut self) {
+        self.firing_queued = false;
+    }
+
+    /// Esc drops a queued press with the cast it waited on.
+    pub(crate) fn drop_queued_press(&mut self) {
+        self.queued = None;
+    }
+
+    /// The resend whose instant has come, as `(spell_id, target)`; the record restarts from it.
+    pub(crate) fn take_due_resend(&mut self, now: Instant) -> Option<(u32, Option<u64>)> {
+        let p = self.cast.as_mut()?;
+        let Resend::Due(target, at) = p.resend else {
+            return None;
+        };
+        if now < at {
+            return None;
+        }
+        p.resend = Resend::Spent;
+        p.sent = now;
+        p.deadline = now + SEND_PROVISIONAL;
+        Some((p.spell_id, target))
+    }
+
+    /// A new record over an early-opened one keeps the old id in [`Self::released`].
+    fn replace(&mut self, next: PendingCastState) {
+        let now = next.sent;
+        self.released = self
+            .cast
+            .take()
+            .filter(|p| p.guards && now < p.deadline && p.release.is_some_and(|r| now >= r))
+            .map(|p| p.spell_id);
+        self.cast = Some(next);
+        // A committed cast supersedes whatever press waited for the slot.
+        self.queued = None;
+    }
+
+    /// `SMSG_SPELL_START` for our cast: the real cast time replaces the send-time deadline, and
+    /// the spell queue sets its early open. An instant passes 0 and keeps its deadline. Whatever an
+    /// early-opened predecessor still owed has arrived by now, so it is dropped.
     pub(crate) fn refine(&mut self, cast_time_ms: u32, now: Instant) {
-        if let Some(p) = &mut self.0 {
-            p.deadline = now + Duration::from_millis(u64::from(cast_time_ms)) + CAST_SLACK;
+        self.released = None;
+        if cast_time_ms == 0 {
+            return;
+        }
+        let spell_queue = self.spell_queue.then_some(self.spell_queue_buffer);
+        if let Some(p) = &mut self.cast {
+            let cast_time = Duration::from_millis(u64::from(cast_time_ms));
+            p.deadline = now + cast_time + CAST_SLACK;
+            p.release = spell_queue
+                .filter(|_| p.guards)
+                .map(|b| p.sent + cast_time + b);
         }
     }
 
     /// `SMSG_SPELL_DELAYED`: extend from the later of the deadline and now, so a lapsed deadline
-    /// re-arms.
+    /// re-arms. The early open moves by the same pushback.
     pub(crate) fn delay(&mut self, delay_ms: u32, now: Instant) {
-        if let Some(p) = &mut self.0 {
-            p.deadline = p.deadline.max(now) + Duration::from_millis(u64::from(delay_ms));
+        if let Some(p) = &mut self.cast {
+            let delay = Duration::from_millis(u64::from(delay_ms));
+            p.deadline = p.deadline.max(now) + delay;
+            p.release = p.release.map(|r| r + delay);
         }
     }
 
-    /// Clear on a resolution for our spell only: a proc's `SMSG_SPELL_GO` mid-cast must not.
+    /// Clear on a failure or a local cancel for our spell only: a proc's failure must not.
     pub(crate) fn clear_if(&mut self, spell_id: u32) {
-        if self.0.as_ref().is_some_and(|p| p.spell_id == spell_id) {
-            self.0 = None;
+        if self.cast.as_ref().is_some_and(|p| p.spell_id == spell_id) {
+            self.cast = None;
         }
     }
+
+    /// Clear on a success (`SMSG_CAST_RESULT` ok, `go = false`; `SMSG_SPELL_GO`, `go = true`). An
+    /// early-opened predecessor of the same id takes it first, and its GO ends it.
+    pub(crate) fn complete_if(&mut self, spell_id: u32, go: bool) {
+        if self.released == Some(spell_id) {
+            if go {
+                self.released = None;
+            }
+            return;
+        }
+        self.clear_if(spell_id);
+    }
+}
+
+/// Sends the spell queue's due resend, the same `CMSG_CAST_SPELL` the server refused.
+pub(super) fn send_due_resend(mut pending: ResMut<PendingCast>, net: Res<NetCommands>) {
+    if let Some((spell_id, target)) = pending.take_due_resend(Instant::now()) {
+        if *crate::net::CAST_TRACE {
+            info!("cast-trace: SEND spell queue resend — spell {spell_id}");
+        }
+        benilla_assets::trace::line("cast", &format!("resend spell {spell_id}"));
+        let _ = net.0.send(ClientCommand::CastSpell { spell_id, target });
+    }
+}
+
+/// Runs the spell queue's due press through the ladder, as the player's press would have run;
+/// true when one fired. [`crate::script_calls::apply_script_calls`] calls it after the frame's
+/// own calls, which may have replaced it, and resumes a press held at the attack pick.
+pub(crate) fn fire_queued_press(cast: &mut crate::spell::ScriptCast) -> bool {
+    let Some(press) = cast.ladder.pending.take_due_press(Instant::now()) else {
+        return false;
+    };
+    if *crate::net::CAST_TRACE {
+        info!("cast-trace: spell queue fires spell {}", press.spell_id);
+    }
+    benilla_assets::trace::line("cast", &format!("queued fire spell {}", press.spell_id));
+    let ctx = cast.targeting.context().self_bound(press.on_self);
+    cast.ladder.send_spell(press.spell_id, &ctx, press.on_self);
+    cast.ladder.pending.queued_press_done();
+    true
 }
 
 /// Our queued on-next-swing spell (Heroic Strike, Cleave: `Attributes & 0x404`). The reference
@@ -317,6 +565,9 @@ impl SelfCancel<'_, '_> {
         if !esc && !moved {
             return;
         }
+        if esc {
+            pending.drop_queued_press();
+        }
         let flags_open = |pick: fn(&benilla_formats::SpellDisplay) -> bool, spell_id: u32| {
             // An uncataloged spell cancels, as the server interrupts any ordinary cast.
             spells
@@ -482,6 +733,259 @@ mod tests {
             "refined to 1.5s + slack, the guard has opened by t+4s (it would still be shut at the \
              5s provisional)"
         );
+    }
+
+    fn queued(buffer_ms: u64) -> PendingCast {
+        PendingCast {
+            spell_queue: true,
+            spell_queue_buffer: Duration::from_millis(buffer_ms),
+            ..PendingCast::default()
+        }
+    }
+
+    const MS: fn(u64) -> Duration = Duration::from_millis;
+
+    #[test]
+    fn without_spell_queue_the_guard_holds_until_the_resolution() {
+        let t0 = Instant::now();
+        let mut g = PendingCast::default();
+        g.arm(FIREBALL, t0, true);
+        g.refine(1_500, t0 + MS(100));
+        assert!(
+            g.in_flight(t0 + MS(1_900)),
+            "past the cast end the reference still waits for the server"
+        );
+    }
+
+    #[test]
+    fn spell_queue_opens_at_send_plus_cast_time_plus_buffer() {
+        let t0 = Instant::now();
+        let mut g = queued(55);
+        g.arm(FIREBALL, t0, true);
+        g.refine(1_500, t0 + MS(150)); // START one round trip later
+        assert!(g.in_flight(t0 + MS(1_554)));
+        assert!(
+            !g.in_flight(t0 + MS(1_555)),
+            "anchored on the send, not on the START, so the round trip is not paid again"
+        );
+        assert_eq!(
+            g.current(t0 + MS(1_555)),
+            None,
+            "the checked ring drops with it"
+        );
+    }
+
+    #[test]
+    fn spell_queue_leaves_an_instant_to_its_resolution() {
+        let t0 = Instant::now();
+        let mut g = queued(55);
+        g.arm(FIREBALL, t0, true);
+        g.refine(0, t0 + MS(150));
+        assert!(
+            g.in_flight(t0 + MS(200)),
+            "an instant's START names no cast time"
+        );
+    }
+
+    #[test]
+    fn a_pushback_moves_the_early_open() {
+        let t0 = Instant::now();
+        let mut g = queued(55);
+        g.arm(FIREBALL, t0, true);
+        g.refine(1_500, t0 + MS(150));
+        g.delay(500, t0 + MS(800));
+        assert!(g.in_flight(t0 + MS(2_000)));
+        assert!(!g.in_flight(t0 + MS(2_055)));
+    }
+
+    #[test]
+    fn the_early_opened_casts_echo_does_not_resolve_the_next_cast() {
+        let t0 = Instant::now();
+        let mut g = queued(55);
+        g.arm(FIREBALL, t0, true);
+        g.refine(1_500, t0 + MS(150));
+        let t1 = t0 + MS(1_560);
+        g.arm(FIREBALL, t1, true); // the next Fireball, sent before the last one's GO
+        g.complete_if(FIREBALL, false); // the last one's CAST_RESULT ok
+        g.complete_if(FIREBALL, true); // and its GO
+        assert!(
+            g.in_flight(t1 + MS(10)),
+            "the echo belonged to the cast before; the new one still guards"
+        );
+        g.refine(1_500, t1 + MS(150));
+        g.complete_if(FIREBALL, true); // the new cast's own GO
+        assert!(!g.in_flight(t1 + MS(1_600)));
+    }
+
+    #[test]
+    fn a_rejected_early_cast_opens_the_guard_at_once() {
+        let t0 = Instant::now();
+        let mut g = queued(55);
+        g.arm(FIREBALL, t0, true);
+        g.refine(1_500, t0 + MS(150));
+        let t1 = t0 + MS(1_560);
+        g.arm(FIREBALL, t1, true);
+        g.clear_if(FIREBALL); // SPELL_FAILED_SPELL_IN_PROGRESS for the new cast
+        assert!(
+            !g.in_flight(t1 + MS(10)),
+            "a refusal never leaves the guard shut to the 5 s provisional deadline"
+        );
+        g.complete_if(FIREBALL, true); // the cast before still lands; nothing to open
+        assert!(!g.in_flight(t1 + MS(20)));
+    }
+
+    /// A Fireball sent over an early-opened one, at `t0 + 1560 ms`.
+    fn early_second_cast(buffer_ms: u64) -> (PendingCast, Instant) {
+        let t0 = Instant::now();
+        let mut g = queued(buffer_ms);
+        g.arm(FIREBALL, t0, true);
+        g.refine(1_500, t0 + MS(150));
+        let t1 = t0 + MS(1_560);
+        g.arm(FIREBALL, t1, true);
+        g.offer_resend(Some(42));
+        (g, t1)
+    }
+
+    #[test]
+    fn a_refused_early_cast_is_resent_once_a_buffer_later() {
+        let (mut g, t1) = early_second_cast(55);
+        let refused = t1 + MS(150);
+        assert!(g.schedule_resend(FIREBALL, refused));
+        assert!(
+            g.in_flight(refused + MS(10)),
+            "the guard holds for the resend"
+        );
+        assert_eq!(g.take_due_resend(refused + MS(54)), None);
+        assert_eq!(
+            g.take_due_resend(refused + MS(55)),
+            Some((FIREBALL, Some(42))),
+            "the same spell at the same target"
+        );
+        assert_eq!(g.take_due_resend(refused + MS(56)), None, "sent once");
+        assert!(
+            !g.schedule_resend(FIREBALL, refused + MS(200)),
+            "a second refusal resolves the cast as the reference would"
+        );
+    }
+
+    #[test]
+    fn the_predecessors_late_echo_does_not_resolve_the_pending_resend() {
+        let (mut g, t1) = early_second_cast(55);
+        assert!(g.schedule_resend(FIREBALL, t1 + MS(150)));
+        g.complete_if(FIREBALL, false); // the predecessor's CAST_RESULT ok
+        g.complete_if(FIREBALL, true); // and its GO
+        assert!(g.in_flight(t1 + MS(170)));
+        assert!(g.take_due_resend(t1 + MS(205)).is_some());
+    }
+
+    #[test]
+    fn a_cast_not_sent_early_takes_no_resend() {
+        let t0 = Instant::now();
+        let mut g = queued(55);
+        g.arm(FIREBALL, t0, true);
+        g.offer_resend(Some(42));
+        assert!(
+            !g.schedule_resend(FIREBALL, t0 + MS(150)),
+            "a refusal of an ordinary cast is the reference's failure"
+        );
+    }
+
+    #[test]
+    fn a_local_cancel_drops_the_due_resend() {
+        let (mut g, t1) = early_second_cast(55);
+        assert!(g.schedule_resend(FIREBALL, t1 + MS(150)));
+        g.clear_if(FIREBALL); // moved or Esc
+        assert_eq!(g.take_due_resend(t1 + MS(300)), None);
+    }
+
+    fn press(spell_id: u32) -> crate::spell::HeldCast {
+        crate::spell::HeldCast {
+            spell_id,
+            on_self: false,
+        }
+    }
+
+    /// A Fireball sent at `t0` whose START names 1.5 s: the guard opens at `t0 + 1555 ms`.
+    fn casting(buffer_ms: u64) -> (PendingCast, Instant) {
+        let t0 = Instant::now();
+        let mut g = queued(buffer_ms);
+        g.arm(FIREBALL, t0, true);
+        g.refine(1_500, t0 + MS(150));
+        (g, t0)
+    }
+
+    #[test]
+    fn a_press_inside_the_window_waits_for_the_guard_to_open() {
+        let (mut g, t0) = casting(55);
+        let pressed = t0 + MS(1_200); // 355 ms before the open, inside 400
+        assert!(g.queue_behind_cast(press(FIREBALL), pressed));
+        assert_eq!(g.take_due_press(t0 + MS(1_554)), None);
+        assert_eq!(g.take_due_press(t0 + MS(1_555)), Some(press(FIREBALL)));
+        assert_eq!(g.take_due_press(t0 + MS(1_556)), None, "fired once");
+    }
+
+    #[test]
+    fn a_press_before_the_window_is_refused() {
+        let (mut g, t0) = casting(55);
+        assert!(
+            !g.queue_behind_cast(press(FIREBALL), t0 + MS(1_000)),
+            "555 ms out is outside a 400 ms window"
+        );
+    }
+
+    #[test]
+    fn without_the_spell_queue_nothing_queues() {
+        let t0 = Instant::now();
+        let mut g = PendingCast::default();
+        g.arm(FIREBALL, t0, true);
+        g.refine(1_500, t0 + MS(150));
+        assert!(!g.queue_behind_cast(press(FIREBALL), t0 + MS(1_400)));
+        assert!(!g.queue_behind_cooldown(press(FIREBALL), t0, t0 + MS(100)));
+    }
+
+    #[test]
+    fn a_guard_with_no_early_open_queues_nothing() {
+        let t0 = Instant::now();
+        let mut g = queued(55);
+        g.arm(FIREBALL, t0, true); // no START yet
+        assert!(!g.queue_behind_cast(press(FIREBALL), t0 + MS(10)));
+    }
+
+    #[test]
+    fn a_newer_press_replaces_the_queued_one() {
+        let (mut g, t0) = casting(55);
+        assert!(g.queue_behind_cast(press(FIREBALL), t0 + MS(1_300)));
+        assert!(g.queue_behind_cast(press(FIREBALL + 1), t0 + MS(1_400)));
+        assert_eq!(g.take_due_press(t0 + MS(1_555)), Some(press(FIREBALL + 1)));
+    }
+
+    #[test]
+    fn a_press_queued_behind_the_gcd_fires_at_its_end_and_counts_as_early() {
+        let t0 = Instant::now();
+        let mut g = queued(55);
+        let gcd_end = t0 + MS(1_500);
+        assert!(g.queue_behind_cooldown(press(FIREBALL), t0 + MS(1_200), gcd_end));
+        assert_eq!(g.take_due_press(gcd_end), Some(press(FIREBALL)));
+        g.arm(FIREBALL, gcd_end, true); // the ladder ran and sent it
+        g.offer_resend(None);
+        g.queued_press_done();
+        assert!(
+            g.schedule_resend(FIREBALL, gcd_end + MS(150)),
+            "a cast off the queue is covered by the resend"
+        );
+    }
+
+    #[test]
+    fn a_cast_resolved_on_time_leaves_no_predecessor() {
+        let t0 = Instant::now();
+        let mut g = queued(55);
+        g.arm(FIREBALL, t0, true);
+        g.refine(1_500, t0 + MS(150));
+        g.complete_if(FIREBALL, true); // GO before the early open
+        let t1 = t0 + MS(1_600);
+        g.arm(FIREBALL, t1, true);
+        g.complete_if(FIREBALL, true);
+        assert!(!g.in_flight(t1), "the new cast's own GO resolves it");
     }
 
     #[test]

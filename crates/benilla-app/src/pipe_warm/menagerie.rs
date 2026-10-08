@@ -48,6 +48,9 @@ pub(super) struct WarmLanes<'w> {
     /// `Option`: an app without the shadow plugins (tests, the glue) has no store.
     shadow_solid: Option<ResMut<'w, Assets<crate::shadow_core::ShadowCasterMaterial>>>,
     shadow_cutout: Option<ResMut<'w, Assets<crate::world_shadow::CutoutShadowCasterMaterial>>>,
+    /// MONKEY (gpu character shadows): the character lane's palette-skinned proxy.
+    shadow_skinned:
+        Option<ResMut<'w, Assets<crate::character_shadow::SkinnedShadowCasterMaterial>>>,
 }
 
 /// A portrait booth camera and its layer. Booths run `Msaa::Off`, so each model pipeline has a
@@ -605,7 +608,10 @@ pub(super) fn spawn_menagerie(
     solid_mesh.insert_indices(Indices::U32(vec![0, 1, 2]));
     let mut cutout_mesh = crate::shadow_core::empty_cutout_mesh();
     cutout_mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, tri.to_vec());
-    cutout_mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32, 0.0], [1.0, 0.0], [1.0, 1.0]]);
+    cutout_mesh.insert_attribute(
+        Mesh::ATTRIBUTE_UV_0,
+        vec![[0.0f32, 0.0], [1.0, 0.0], [1.0, 1.0]],
+    );
     cutout_mesh.insert_indices(Indices::U32(vec![0, 1, 2]));
     if let Some(store) = lanes.shadow_solid.as_mut() {
         let solid = store.add(crate::shadow_core::ShadowCasterMaterial {});
@@ -626,12 +632,30 @@ pub(super) fn spawn_menagerie(
         spawn_lane_rig(
             commands,
             cam,
-            Some(proxy_layers),
+            Some(proxy_layers.clone()),
             &meshes.add(cutout_mesh),
             None,
             cutout,
             &mut count,
         );
+    }
+    // MONKEY (gpu character shadows): the character proxy shares a unit part's own mesh, so it
+    // rides the model lane's four layouts; the skinned two take its `WOW_RIG_SKIN` shadow stage.
+    if let Some(store) = lanes.shadow_skinned.as_mut() {
+        let skinned = store.add(crate::character_shadow::SkinnedShadowCasterMaterial::new(
+            light.clone(),
+        ));
+        for (mesh, aabb, _) in &layouts {
+            spawn_lane_rig(
+                commands,
+                cam,
+                Some(proxy_layers.clone()),
+                mesh,
+                aabb.as_ref(),
+                skinned.clone(),
+                &mut count,
+            );
+        }
     }
 
     count

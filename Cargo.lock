@@ -507,6 +507,7 @@ dependencies = [
  "assert_no_alloc",
  "avian3d",
  "benilla-assets",
+ "benilla-dlss5",
  "benilla-formats",
  "benilla-protocol",
  "benilla-srp",
@@ -581,6 +582,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "benilla-dlss5"
+version = "0.2.0"
+dependencies = [
+ "ash",
+ "bevy",
+ "libloading",
+ "wgpu",
+]
+
+[[package]]
 name = "benilla-formats"
 version = "0.2.0"
 dependencies = [
@@ -612,6 +623,10 @@ dependencies = [
  "benilla-bytes",
  "flate2",
 ]
+
+[[package]]
+name = "benilla-nvngx"
+version = "0.2.0"
 
 [[package]]
 name = "benilla-protocol"
@@ -669,6 +684,7 @@ version = "0.2.0"
 dependencies = [
  "avian3d",
  "benilla-assets",
+ "benilla-dlss5",
  "benilla-formats",
  "benilla-wmo",
  "bevy",

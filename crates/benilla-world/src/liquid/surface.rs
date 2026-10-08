@@ -121,15 +121,20 @@ impl LiquidAssets {
 #[derive(Component)]
 pub(crate) struct LiquidSurface;
 
-/// `WOW_NO_LIQUID`: hide every liquid surface and only the surface, since the swim grid, foam and
-/// sound ride sibling components. An override run after both per-frame `Visibility` owners (the
-/// exterior cull for ADT surfaces, `apply_model_visibility` for WMO pools), so it wins the frame.
+/// `WOW_NO_LIQUID`: hide every liquid surface and only the surface,
+/// since the swim grid, foam and sound ride sibling components. An override run after both
+/// per-frame `Visibility` owners (the exterior cull for ADT surfaces, `apply_model_visibility`
+/// for WMO pools), so it wins the frame.
 pub(super) fn hide_liquid_surfaces(mut surfaces: Query<&mut Visibility, With<LiquidSurface>>) {
     for mut vis in &mut surfaces {
         if *vis != Visibility::Hidden {
             *vis = Visibility::Hidden;
         }
     }
+}
+
+pub(super) fn liquid_surfaces_disabled() -> bool {
+    std::env::var_os("WOW_NO_LIQUID").is_some()
 }
 
 /// The ambient loop's sound-class nibble, resolved through `SoundWaterType.dbc` (`0x54e0a0`), on
@@ -378,9 +383,14 @@ pub(super) fn setup_liquid(
     // the time anything draws — the same path terrain and the models take.
     // Read once at setup; only frozen water captures consume this override.
     let capture_time = if std::env::var_os("WOW_CAPTURE").is_some() {
-        std::env::var("WOW_CAPTURE_WATER_T").ok().and_then(|v| v.parse::<f32>().ok())
-            .filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0)
-    } else { 0.0 };
+        std::env::var("WOW_CAPTURE_WATER_T")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
     let deterministic = crate::dev_state::deterministic_run();
     let mut assets = LiquidAssets::default();
     for &(kind, dir, stem, count) in FRAME_SETS {

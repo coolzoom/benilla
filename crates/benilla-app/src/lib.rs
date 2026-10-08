@@ -67,7 +67,7 @@ mod sky_quality;
 // MONKEY (ao): optional screen-space ambient occlusion plugin.
 mod ssao;
 // MONKEY (skybox): the zoneSkyboxes cvar bridge.
-mod zone_skybox;
+mod character_shadow;
 mod entities;
 mod fishing_line;
 mod footprints;
@@ -90,7 +90,6 @@ mod npc_text;
 mod pending_item_ops;
 /// Ships in part (the FPS journal and the clocks it reads); the rest is `dev`.
 mod perf;
-mod character_shadow;
 mod pipe_warm;
 mod player;
 mod poi_marker;
@@ -111,6 +110,7 @@ mod screenshot;
 mod script_calls;
 mod shaders;
 mod shadow_core;
+mod zone_skybox;
 
 mod game_tip;
 mod name_persist;
@@ -131,6 +131,8 @@ pub(crate) mod test_support;
 mod text_filter;
 mod text_reshape;
 mod textinput;
+mod torch_shadow;
+
 #[cfg(target_os = "android")]
 mod touch_mouse;
 mod transport;
@@ -203,7 +205,6 @@ mod ui_unit;
 mod ui_world_map;
 mod video;
 mod vplates;
-mod torch_shadow;
 mod weapon_trail;
 mod world_backdrop;
 mod world_shadow;
@@ -349,6 +350,12 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
 
     // No `game://` source: the five UI shaders are compiled in by `crate::shaders`
     // (`embedded://benilla_app/shaders/…`), so no build-machine path reaches the binary.
+
+    // This is deliberately the historical Cargo opt-in, not a runtime environment toggle. The
+    // plugin must register Feature 18's Vulkan extensions before `DefaultPlugins` creates wgpu's
+    // device; normal builds do not link or initialize NGX at all.
+    #[cfg(feature = "dlss")]
+    app.add_plugins(benilla_dlss5::DlssNrPlugin::new(local_state::ngx_dir()));
 
     app.add_plugins(benilla_world::boot::tuned_default_plugins(Window {
         title: "benilla".into(),

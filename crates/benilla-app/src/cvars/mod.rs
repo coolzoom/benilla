@@ -1509,6 +1509,15 @@ mod tests {
         assert_eq!(d["cameraYawSmoothSpeed"], follow.yaw_speed);
         assert_eq!(FollowStyle::default(), FollowStyle::Smart);
         assert_eq!(d["autoLootDefault"] != 0.0, LootConfig::default().auto_loot);
+        assert_eq!(d["spellQueue"], 0.0, "the spell queue ships off");
+        assert_eq!(
+            d["spellQueueBufferMs"],
+            crate::spell::inflight::SPELL_QUEUE_BUFFER_MS as f32
+        );
+        assert_eq!(
+            d["SpellQueueWindow"],
+            crate::spell::inflight::SPELL_QUEUE_WINDOW_MS as f32
+        );
         assert_eq!(
             d["showLootSpam"] != 0.0,
             LootConfig::default().show_loot_spam
@@ -1734,15 +1743,33 @@ mod tests {
                 assert_eq!(cvars.get("shadowDistance"), Some("120"));
                 assert_eq!(cvars.get("interiorShadowSoft"), Some("2.5"));
                 // MONKEY (volumetric fog): Off must remove atmosphere as well as enhanced water.
-                for member in ["fireLightGain", "waterQuality", "volumetricFog", "lavaLightGain", "nightGain", "interiorGain"] {
+                for member in [
+                    "fireLightGain",
+                    "waterQuality",
+                    "volumetricFog",
+                    "lavaLightGain",
+                    "nightGain",
+                    "interiorGain",
+                ] {
                     let expected = if *name == "Off" {
-                        if matches!(member, "fireLightGain" | "waterQuality" | "volumetricFog" | "lavaLightGain") { "0" } else { "1.0" }
-                    } else if *name == "Ultra" && matches!(member, "waterQuality" | "volumetricFog") {
+                        if matches!(
+                            member,
+                            "fireLightGain" | "waterQuality" | "volumetricFog" | "lavaLightGain"
+                        ) {
+                            "0"
+                        } else {
+                            "1.0"
+                        }
+                    } else if *name == "Ultra" && matches!(member, "waterQuality" | "volumetricFog")
+                    {
                         "2" // MONKEY (presets): Ultra's two maxima over the defaults.
                     } else {
                         cvars.default_of(member).unwrap()
                     };
-                    assert!(same_value(cvars.get(member).unwrap(), expected), "{name}/{member}");
+                    assert!(
+                        same_value(cvars.get(member).unwrap(), expected),
+                        "{name}/{member}"
+                    );
                 }
             }
         }
@@ -1786,8 +1813,8 @@ mod tests {
                 apply_lighting_preset(&mut cvars, name);
                 // Somewhere else on the row's own scale: the flags flip, the numbers move by one.
                 let moved = match v.trim().parse::<f32>() {
-                    Ok(x) if x == 0.0 => "1".to_string(),
-                    Ok(x) if x == 1.0 => "0".to_string(),
+                    Ok(0.0) => "1".to_string(),
+                    Ok(1.0) => "0".to_string(),
                     Ok(x) => (x + 1.0).to_string(),
                     Err(_) => format!("{v}x"),
                 };
@@ -2060,7 +2087,11 @@ mod tests {
         assert!(cvars.reapply_saved_presets() > 0);
         assert_eq!(cvars.get("shadowMapSize"), Some("4096"));
         assert_eq!(cvars.get("interiorShadowCasters"), Some("16"));
-        assert_eq!(cvars.get("volumetricFog"), Some("1"), "a saved member stays");
+        assert_eq!(
+            cvars.get("volumetricFog"),
+            Some("1"),
+            "a saved member stays"
+        );
         // No Graphics rung saved: the graphics rows keep their defaults.
         assert_eq!(
             cvars.get("ambientOcclusion"),
@@ -2204,20 +2235,25 @@ mod tests {
         for seeded in [false, true] {
             for flush_preset_first in [false, true] {
                 let mut app = cvar_app();
-                app.world_mut().non_send_resource_mut::<UiScript>()
+                app.world_mut()
+                    .non_send_resource_mut::<UiScript>()
                     .register_cvars(registered_pairs());
                 // Run the production Update schedule without Startup's on-disk config load.
                 if seeded {
                     app.world_mut().run_schedule(Update);
                 }
-                app.world_mut().non_send_resource_mut::<UiScript>()
-                    .run("SetCVar('lightingQuality', 'Low')").unwrap();
+                app.world_mut()
+                    .non_send_resource_mut::<UiScript>()
+                    .run("SetCVar('lightingQuality', 'Low')")
+                    .unwrap();
                 if flush_preset_first {
                     app.world_mut().run_schedule(Update);
                     assert_eq!(res::<VideoConfig>(&app).shadow_map_size, 1024);
                 }
-                app.world_mut().non_send_resource_mut::<UiScript>()
-                    .run("SetCVar('shadowMapSize', '4096')").unwrap();
+                app.world_mut()
+                    .non_send_resource_mut::<UiScript>()
+                    .run("SetCVar('shadowMapSize', '4096')")
+                    .unwrap();
                 for _ in 0..3 {
                     app.world_mut().run_schedule(Update);
                     let cvars = res::<Cvars>(&app);
@@ -2226,7 +2262,10 @@ mod tests {
                     assert_eq!(res::<VideoConfig>(&app).shadow_map_size, 4096);
                     let script = app.world().non_send_resource::<UiScript>();
                     assert_eq!(script.cvar("shadowMapSize").as_deref(), Some("4096"));
-                    assert_eq!(script.cvar("lightingQuality").as_deref(), Some(LIGHTING_CUSTOM));
+                    assert_eq!(
+                        script.cvar("lightingQuality").as_deref(),
+                        Some(LIGHTING_CUSTOM)
+                    );
                 }
             }
         }
@@ -2249,7 +2288,12 @@ mod tests {
     #[test]
     fn water_and_lava_observers_clamp_and_water_high_is_opt_in() {
         let mut app = cvar_app();
-        for (value, water, lava) in [("-1", 0, 0.0), ("1.75", 1, 1.75), ("2", 2, 2.0), ("9", 2, 4.0)] {
+        for (value, water, lava) in [
+            ("-1", 0, 0.0),
+            ("1.75", 1, 1.75),
+            ("2", 2, 2.0),
+            ("9", 2, 4.0),
+        ] {
             apply(&mut app, "waterQuality", value);
             apply(&mut app, "lavaLightGain", value);
             assert_eq!(res::<VideoConfig>(&app).water_quality, water);
@@ -2785,7 +2829,11 @@ mod tests {
         let player: Vec<&String> = back
             .cvars
             .keys()
-            .filter(|k| !GRAPHICS_PRESETS.iter().any(|(g, _)| g.eq_ignore_ascii_case(k)))
+            .filter(|k| {
+                !GRAPHICS_PRESETS
+                    .iter()
+                    .any(|(g, _)| g.eq_ignore_ascii_case(k))
+            })
             .collect();
         assert_eq!(player.len(), 1, "a diff, not a dump: {text}");
         assert!(!text.contains("graphicsQuality"), "{text}");
@@ -2894,6 +2942,10 @@ mod tests {
         },
         |app| {
             app.add_observer(crate::spell::cast_target::on_cvar);
+        },
+        |app| {
+            app.init_resource::<crate::spell::PendingCast>();
+            app.add_observer(crate::spell::inflight::on_cvar);
         },
         |app| {
             app.add_observer(crate::combat_text::on_cvar);
@@ -3388,7 +3440,10 @@ mod tests {
         .unwrap();
         let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
         // MONKEY (reviewfix-a): the fixture is named by its own variable, not BENILLA_HOME.
-        let _x = EnvGuard::set("WOW_CAPTURE_CVARS", tmp.join("config.toml").to_str().unwrap());
+        let _x = EnvGuard::set(
+            "WOW_CAPTURE_CVARS",
+            tmp.join("config.toml").to_str().unwrap(),
+        );
         let _c = EnvGuard::set("WOW_CAPTURE", "post-lava-searing");
 
         assert_eq!(boot_cvar("bloom").as_deref(), Some("0"));
@@ -3557,7 +3612,10 @@ mod tests {
             if k.eq_ignore_ascii_case("lightingQuality") {
                 continue; // High on that ladder IS the registered defaults (its own test)
             }
-            let row = REGISTERED.iter().find(|r| r.name == *k).expect("governed row registered");
+            let row = REGISTERED
+                .iter()
+                .find(|r| r.name == *k)
+                .expect("governed row registered");
             let declared = SEEDED_DEVIATIONS.iter().find(|(n, _, _)| n == k);
             match reference_boot_value(row) {
                 Some(reference) if !same_value(values[col], reference) => {
@@ -3568,7 +3626,10 @@ mod tests {
                             values[col]
                         )
                     });
-                    assert!(same_value(value, reference), "{k}: declared reference is stale");
+                    assert!(
+                        same_value(value, reference),
+                        "{k}: declared reference is stale"
+                    );
                     assert!(!why.trim().is_empty(), "{k}: a deviation owes a reason");
                 }
                 _ => assert!(

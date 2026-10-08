@@ -17,7 +17,7 @@ mod cast_send;
 pub(crate) mod cast_target;
 pub(crate) mod cooldowns;
 pub(crate) mod group_relation;
-mod inflight;
+pub(crate) mod inflight;
 mod mods;
 pub(crate) mod net;
 mod range_units;
@@ -31,8 +31,8 @@ pub(crate) use cast_send::{CastCommit, CastLadder, HeldCast, HeldForPick, Target
 pub(crate) use cast_target::AutoSelfCast;
 pub(crate) use cooldowns::Cooldowns;
 pub(crate) use inflight::{
-    inflight, ActiveChannel, AutoRepeatActive, LocalMoveStart, PendingCast, QueuedMeleeSpell,
-    SelfCancel, SPELL_INTERRUPT_MOVEMENT,
+    fire_queued_press, inflight, ActiveChannel, AutoRepeatActive, LocalMoveStart, PendingCast,
+    QueuedMeleeSpell, SelfCancel, SPELL_INTERRUPT_MOVEMENT,
 };
 pub(crate) use mods::{ModsDiff, SpellModifiers, OP_CAST_TIME, OP_COST, OP_GCD, OP_RADIUS};
 #[cfg(test)]
@@ -76,12 +76,16 @@ impl Plugin for SpellPlugin {
             .init_resource::<targeting::UnitPick>()
             .init_resource::<group_relation::GroupRoster>()
             .add_observer(cast_target::on_cvar)
+            .add_observer(inflight::on_cvar)
             .add_systems(
                 Update,
                 (
                     inflight::local_self_cancel
                         .in_set(UnitFeed)
                         .in_set(LocalCancel),
+                    inflight::send_due_resend
+                        .after(WorldStage::Net)
+                        .before(UnitFeed),
                     mods::track_class_family
                         .after(WorldStage::Net)
                         .before(UnitFeed),

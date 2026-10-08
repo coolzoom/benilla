@@ -22,7 +22,9 @@ use bevy::shader::{load_shader_library, ShaderRef};
 /// registry that plugin creates); [`crate::register_asset_loaders`] already does.
 pub fn register_shaders(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/terrain.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/wow_model_skin.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/wow_model.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/wow_model_prepass.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/wdl.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/liquid.wgsl");
     // MONKEY (shadow hook): register the importable shadow-contribution library `benilla::shadow_hook`
@@ -159,7 +161,12 @@ pub struct WowModelExt {
     /// `Depth`, which `Depth32Float` is). The image is created ONCE at app startup regardless of
     /// the cvars — an absent image would stall every model material's bind group on
     /// `RetryNextUpdate` and blank every model. Fragment-only, like static_gx's group 3.
-    #[texture(91, dimension = "2d_array", sample_type = "depth", visibility(fragment))]
+    #[texture(
+        91,
+        dimension = "2d_array",
+        sample_type = "depth",
+        visibility(fragment)
+    )]
     #[sampler(92, sampler_type = "comparison", visibility(fragment))]
     pub torch_depth: Handle<Image>,
     /// MONKEY (static torch cache): the ≤16-fixture torch TABLE — the same 6416-byte
@@ -197,6 +204,14 @@ impl MaterialExtension for WowModelExt {
 
     fn fragment_shader() -> ShaderRef {
         "embedded://benilla_assets/shaders/wow_model.wgsl".into()
+    }
+
+    fn prepass_vertex_shader() -> ShaderRef {
+        "embedded://benilla_assets/shaders/wow_model_prepass.wgsl".into()
+    }
+
+    fn prepass_fragment_shader() -> ShaderRef {
+        "embedded://benilla_assets/shaders/wow_model_prepass.wgsl".into()
     }
 
     /// The reference writes depth for every M2 batch, transparent ones too, and tests `LEQUAL`,
@@ -405,6 +420,13 @@ pub struct WdlExt {
 }
 
 impl MaterialExtension for WdlExt {
+    // `wdl.wgsl` writes its horizon-depth clamp from the fragment stage. The generic prepass
+    // cannot reproduce that clamp and would let the coarse hull occlude detailed ADT terrain.
+    // It is a static backdrop, not a temporal-vector producer, so retain its forward-only pass.
+    fn enable_prepass() -> bool {
+        false
+    }
+
     fn vertex_shader() -> ShaderRef {
         "embedded://benilla_assets/shaders/wdl.wgsl".into()
     }
@@ -520,7 +542,12 @@ pub struct TerrainExtension {
     ///
     /// Fragment-only, like the splat/alpha/shadow arrays above (Bevy 0.18 narrows textures and
     /// samplers but not uniforms) - the vertex stage only picks WHICH lights, it never samples.
-    #[texture(91, dimension = "2d_array", sample_type = "depth", visibility(fragment))]
+    #[texture(
+        91,
+        dimension = "2d_array",
+        sample_type = "depth",
+        visibility(fragment)
+    )]
     #[sampler(92, sampler_type = "comparison", visibility(fragment))]
     pub torch_depth: Handle<Image>,
     /// The 6416-byte `TorchTableUniform` bytes (count / positions[16] / view_projs[96]) as the same
@@ -606,6 +633,64 @@ mod tests {
             "terrain's exterior torch lane is no longer gated on `ext_night_w > 0.0` — daylight is \
              now paying for (and possibly rendering) the night blend, and the day look is free to \
              drift by a rounding step"
+        );
+    }
+
+    /// WDL writes a custom, far-pushed fragment depth. Rendering its raw mesh through Bevy's
+    /// generic prepass would occlude detailed terrain before the forward pass applies that clamp.
+    #[test]
+    fn wdl_stays_out_of_the_generic_prepass() {
+        assert!(
+            !<super::WdlExt as bevy::pbr::MaterialExtension>::enable_prepass(),
+            "the WDL backdrop re-entered Bevy's generic prepass and can occlude detailed terrain"
+        );
+    }
+
+    /// Rigid models retain Bevy's exact helper; only the custom palette-rig path needs paired
+    /// camera-relative positions. This catches a prepass edit that accidentally regresses one
+    /// lane while changing the other.
+    #[test]
+    fn model_prepass_keeps_rigid_motion_stock_and_pairs_rig_history() {
+        let src = include_str!("shaders/wow_model_prepass.wgsl");
+        assert!(
+            src.contains("WOW_RIG_PREVIOUS_PALETTE_ROW_OFFSET")
+                && src.contains("previous_rig_origin")
+                && src.contains("previous_view_uniforms.view_from_world"),
+            "the rigged prepass lost one half of the prior-frame state"
+        );
+        assert!(
+            src.contains("pbr_prepass_functions::calculate_motion_vector(\n        in.world_position,\n        in.previous_world_position,\n    )"),
+            "the rigid prepass must continue to use Bevy's stock motion-vector helper"
+        );
+        assert!(
+            src.contains("view.unjittered_clip_from_world * inverse(view.view_from_world)"),
+            "the rigged branch must project camera-relative positions through the unjittered view"
+        );
+    }
+
+    /// The prepass and the forward pass read one `wow_light` binding through two `WowLight`
+    /// declarations. A member missing on one side moves the rig table and palettes on that side
+    /// only: the prepass writes depth for scrambled geometry and the forward pass fails against it.
+    #[test]
+    fn model_prepass_mirrors_the_forward_light_struct() {
+        let layout = |src: &str| -> Vec<String> {
+            let body = src
+                .split_once("struct WowLight {")
+                .expect("both model passes declare the light struct")
+                .1;
+            body.split_once("\n}")
+                .expect("the struct is closed")
+                .0
+                .lines()
+                .map(|l| l.split_once("//").map_or(l, |(code, _)| code).trim())
+                .filter(|l| !l.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+        assert_eq!(
+            layout(include_str!("shaders/wow_model_prepass.wgsl")),
+            layout(include_str!("shaders/wow_model.wgsl")),
+            "the prepass `WowLight` has drifted from wow_model.wgsl's"
         );
     }
 

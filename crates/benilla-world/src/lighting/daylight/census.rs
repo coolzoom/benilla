@@ -14,15 +14,17 @@ struct Loaded {
     names: Vec<String>,
     portals: benilla_formats::WmoPortals,
     slices: Vec<(u16, u16)>,
-    /// `(group, class, window, sidn, positions)` per render batch.
-    batches: Vec<(
-        u16,
-        benilla_formats::WmoBatchClass,
-        bool,
-        bool,
-        Vec<[f32; 3]>,
-    )>,
+    batches: Vec<BatchRow>,
 }
+
+/// `(group, class, window, sidn, positions)` per render batch.
+type BatchRow = (
+    u16,
+    benilla_formats::WmoBatchClass,
+    bool,
+    bool,
+    Vec<[f32; 3]>,
+);
 
 fn group_names(bytes: &[u8]) -> Vec<String> {
     let (mut mogn, mut mogi) = (None, None);
@@ -41,7 +43,9 @@ fn group_names(bytes: &[u8]) -> Vec<String> {
     let (Some(mogn), Some(mogi)) = (mogn, mogi) else {
         return Vec::new();
     };
-    mogi.chunks_exact(32)
+    mogi.as_chunks::<32>()
+        .0
+        .iter()
         .map(|r| {
             let off = i32::from_le_bytes(r[28..32].try_into().unwrap());
             usize::try_from(off)
@@ -272,8 +276,8 @@ fn city_daylight_census() {
 #[test]
 #[ignore = "instrument: needs WOW_DATA; run by hand with --ignored --nocapture"]
 fn lamp_terrain_occlusion_scan() {
-    let spec = std::env::var("WOW_LAMP_SCAN")
-        .unwrap_or_else(|_| "Azeroth,-9300,150,1,lamppost".into());
+    let spec =
+        std::env::var("WOW_LAMP_SCAN").unwrap_or_else(|_| "Azeroth,-9300,150,1,lamppost".into());
     let p: Vec<&str> = spec.split(',').collect();
     let (map, cx, cy, r, filter) = (
         p[0],
@@ -339,7 +343,13 @@ fn lamp_terrain_occlusion_scan() {
             }
         }
         if total > 0 {
-            rows.push((blocked as f32 / total as f32, l, best, near, h(l[0], l[1]).unwrap_or(f32::NAN)));
+            rows.push((
+                blocked as f32 / total as f32,
+                l,
+                best,
+                near,
+                h(l[0], l[1]).unwrap_or(f32::NAN),
+            ));
         }
     }
     rows.sort_by(|a, b| b.3.cmp(&a.3).then(b.0.total_cmp(&a.0)));

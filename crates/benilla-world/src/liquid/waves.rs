@@ -41,10 +41,6 @@ pub const GERSTNER_CHOP: f32 = 2.4;
 /// Gravity in yd/s², `enhanced_water.wgsl` — deep-water dispersion, `c = sqrt(g/k)`.
 const GRAVITY_YD: f32 = 10.72;
 
-/// `6.2831853` exactly as the shader spells it (`enhanced_water.wgsl`). Identical to `f32::TAU` once
-/// rounded, spelled as the literal so the mirror reads against the line it copies.
-const TWO_PI: f32 = 6.2831853;
-
 /// The ADT **ocean**'s wave energy — `liquid/surface.rs` packs `water.mode.y = 1.0` for
 /// `LiquidPath::Adt` + [`benilla_formats::LiquidKind::Ocean`] (river/lake 0.18, WMO exterior 0.26,
 /// WMO interior 0.08, fullbright 0.0). The vertex swell arm only ever runs on that combination
@@ -109,7 +105,7 @@ fn raw_swell(parameter_xz: Vec2, time: f32, wave_energy: f32, shallow_fade: f32)
     };
     for w in LONG_SWELL {
         let dir = Vec2::new(w[0].cos(), w[0].sin());
-        let k = TWO_PI / w[1];
+        let k = std::f32::consts::TAU / w[1];
         let speed = (GRAVITY_YD / k).sqrt(); // phase speed, yd/s
         let phase = k * (dir.dot(parameter_xz) - speed * tempo * time) + w[3];
         // `fade` is 1 at zero footprint; `i < 2` ⇒ both components take the shore term.
@@ -216,7 +212,8 @@ mod tests {
         );
         assert_eq!(GRAVITY_YD, 10.72, "enhanced_water.wgsl gravity");
         assert_eq!(
-            TWO_PI, 6.2831853,
+            std::f32::consts::TAU.to_bits(),
+            0x40c9_0fdb,
             "enhanced_water.wgsl k = 6.2831853/wavelength"
         );
         assert_eq!(WATER_WIND_DIR, 0.35, "enhanced_water.wgsl WATER_WIND_DIR");

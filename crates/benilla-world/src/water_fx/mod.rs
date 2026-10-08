@@ -35,8 +35,8 @@ use crate::view::WorldCamera;
 use crate::world_unit::{ViewerUnit, WorldUnit};
 use benilla_assets::{AssetSet, WorldAssets};
 
-use params::{foam_params, foam_uv, rand01, record_alpha, record_size, WadeState};
 use params::{foam_gain, swim_ramp, tread_params, FoamLook, TREAD_INTERVAL};
+use params::{foam_params, foam_uv, rand01, record_alpha, record_size, WadeState};
 use params::{wake_cooldown, RING_INTERVAL};
 
 /// The ring and wake stencils, loaded raw: the alpha is the shape and the near-black RGB the
@@ -353,20 +353,30 @@ fn drive_unit(
     // hanging in deep water is the state the reference's driver renders almost invisible, and it
     // is exactly the state the owner's murloc will be in. Classic touches nothing here — not the
     // timer, not the RNG stream.
-    if look.enhanced && look.swimming && !matches!(state, WadeState::Translating { .. }) {
-        if now >= foam_state.tread_ready {
-            foam_state.tread_ready = now + TREAD_INTERVAL;
-            if let Some(p) = tread_params(look, scale, &mut foam_state.rng) {
-                let heading = rand01(&mut foam_state.rng) * std::f32::consts::TAU;
-                emit_record(alloc, index, water, [wow[0], wow[1]], &p, heading, now);
-            }
+    if look.enhanced
+        && look.swimming
+        && !matches!(state, WadeState::Translating { .. })
+        && now >= foam_state.tread_ready
+    {
+        foam_state.tread_ready = now + TREAD_INTERVAL;
+        if let Some(p) = tread_params(look, scale, &mut foam_state.rng) {
+            let heading = rand01(&mut foam_state.rng) * std::f32::consts::TAU;
+            emit_record(alloc, index, water, [wow[0], wow[1]], &p, heading, now);
         }
     }
 
     if !oneshot && now < foam_state.ready {
         return;
     }
-    let Some(p) = foam_params(state, oneshot, scale, gate, depth, look, &mut foam_state.rng) else {
+    let Some(p) = foam_params(
+        state,
+        oneshot,
+        scale,
+        gate,
+        depth,
+        look,
+        &mut foam_state.rng,
+    ) else {
         return;
     };
     let heading = match (p.ring, state) {

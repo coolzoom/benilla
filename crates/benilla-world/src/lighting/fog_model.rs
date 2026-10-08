@@ -46,11 +46,13 @@ impl Default for FogModelSetting {
 fn env_override() -> Option<FogModel> {
     static ENV: std::sync::OnceLock<Option<FogModel>> = std::sync::OnceLock::new();
     *ENV.get_or_init(|| {
-        std::env::var("WOW_FOGMODEL").ok().and_then(|v| match v.trim() {
-            "0" => Some(FogModel::Classic),
-            "1" => Some(FogModel::Modern),
-            _ => None,
-        })
+        std::env::var("WOW_FOGMODEL")
+            .ok()
+            .and_then(|v| match v.trim() {
+                "0" => Some(FogModel::Classic),
+                "1" => Some(FogModel::Modern),
+                _ => None,
+            })
     })
 }
 
@@ -279,9 +281,11 @@ mod tests {
 
     #[test]
     fn modern_marks_the_scene_end_and_fades_the_sun_at_night() {
-        let mut l = WowLighting::default();
-        l.fog_end = 444.0;
-        l.celestial_dir = Vec3::new(0.0, 0.8, 0.6);
+        let mut l = WowLighting {
+            fog_end: 444.0,
+            celestial_dir: Vec3::new(0.0, 0.8, 0.6),
+            ..Default::default()
+        };
         let mut f = MonkeyFrame::default();
         fill_frame(&mut f, FogModel::Modern, &l, &derived_band(&l));
         assert_eq!(f.fog_scene_end, 444.0);

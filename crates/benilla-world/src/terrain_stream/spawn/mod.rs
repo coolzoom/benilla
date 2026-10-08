@@ -173,7 +173,10 @@ pub(super) fn spawn_loaded_placements(
                         // `alliancebrasscannon_flat.m2`, 2026-09-08). Retire it as an empty
                         // spawn so the accounting completes; the reference draws nothing there
                         // either.
-                        if matches!(asset_server.load_state(h), bevy::asset::LoadState::Failed(_)) {
+                        if matches!(
+                            asset_server.load_state(h),
+                            bevy::asset::LoadState::Failed(_)
+                        ) {
                             warn!("placement {unique_id}: its model failed to load — spawning nothing");
                             p.spawned = true;
                             *pending_spawns -= 1;
@@ -344,8 +347,13 @@ pub(super) fn spawn_loaded_placements(
                     let Some(m) = wmos.get(h) else {
                         // MONKEY (missing model): see the M2 arm — a WMO the client lacks
                         // retires as an empty spawn rather than pinning the loading screen.
-                        if matches!(asset_server.load_state(h), bevy::asset::LoadState::Failed(_)) {
-                            warn!("placement {unique_id}: its WMO failed to load — spawning nothing");
+                        if matches!(
+                            asset_server.load_state(h),
+                            bevy::asset::LoadState::Failed(_)
+                        ) {
+                            warn!(
+                                "placement {unique_id}: its WMO failed to load — spawning nothing"
+                            );
                             p.spawned = true;
                             *pending_spawns -= 1;
                             activity.placements_spawned += 1;
@@ -379,13 +387,19 @@ pub(super) fn spawn_loaded_placements(
                             refs: &m.portal_refs,
                             slices: &sky_slices,
                         },
-                        m.submeshes.iter().zip(m.submesh_group.iter()).map(|(s, g)| {
-                            (
-                                *g,
-                                matches!(s.wmo_batch, Some(benilla_formats::WmoBatchClass::Ext)),
-                                &s.geometry.positions[..],
-                            )
-                        }),
+                        m.submeshes
+                            .iter()
+                            .zip(m.submesh_group.iter())
+                            .map(|(s, g)| {
+                                (
+                                    *g,
+                                    matches!(
+                                        s.wmo_batch,
+                                        Some(benilla_formats::WmoBatchClass::Ext)
+                                    ),
+                                    &s.geometry.positions[..],
+                                )
+                            }),
                     );
                     let instance = (has_portals || m.wmo_id != 0).then(|| {
                         commands
@@ -680,7 +694,8 @@ pub(super) fn spawn_loaded_placements(
             .unwrap_or_default();
         let slices = wmo.map(fx::portal_slices).unwrap_or_default();
         // MONKEY (review fixes): the claim list owns its placement even when no MODR names it.
-        let claims = wmo.zip(portal_instance)
+        let claims = wmo
+            .zip(portal_instance)
             .map(|(w, instance)| fx::PropClaims::new(w, &slices, placement, instance));
         for d in &mut p.doodads {
             if d.spawned {
@@ -690,7 +705,10 @@ pub(super) fn spawn_loaded_placements(
                 // MONKEY (missing model): a prop whose M2 the client doesn't ship would hold its
                 // BUILDING un-"up" (`placements_pending`) for the loading screen's whole life —
                 // the 2371 s Stormwind hang on `alliancebrasscannon_flat.m2`. Retire the prop.
-                if matches!(asset_server.load_state(&d.handle), bevy::asset::LoadState::Failed(_)) {
+                if matches!(
+                    asset_server.load_state(&d.handle),
+                    bevy::asset::LoadState::Failed(_)
+                ) {
                     warn!("placement {unique_id}: a WMO prop's model failed to load — skipping it");
                     d.spawned = true;
                     *pending_spawns -= 1;

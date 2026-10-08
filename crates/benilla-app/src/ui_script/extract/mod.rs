@@ -171,7 +171,7 @@ fn report_gate_miss(
         return;
     }
     if !portraits_eq {
-        eprintln!("[ui-gate] miss: portrait sources changed");
+        eprintln!("[ui-gate] miss: portrait sources or pane dressing rooms changed");
         return;
     }
     if now.len() != prev.len() {
@@ -210,6 +210,9 @@ pub(super) struct GateInputs {
     text_ui: Option<benilla_ui::script::EditBoxTextUi>,
     dims: Option<(u32, u32, u32, u32)>,
     portraits: std::collections::HashMap<String, crate::portrait::PortraitSource>,
+    /// Which pane each dressing-room pool booth draws: a `<DressUpModel>` claimed after its window
+    /// converted samples nothing until a conversion sees the claim.
+    pool: Vec<Option<benilla_ui::widget::FrameHandle>>,
     /// The `UiFontAtlas::generation` the held glyph UVs came from; it moves only on a reset.
     generation: Option<u64>,
     /// Per-entry prefix ends: entry `i`'s quads are `spans[i-1]..spans[i]` of `UiQuads::quads`
@@ -677,11 +680,13 @@ pub(super) fn paint_script(
     // ── The extract gate ──────────────────────────────────────────────────────
     // Equal inputs skip the conversion; the quads, minimap slot and link spans stay as they are.
     let dims = (w.to_bits(), h.to_bits(), s.to_bits(), dpi.to_bits());
+    let pool: Vec<_> = booths.pool.0.iter().map(|d| d.pane).collect();
+    let portraits_eq = booths.images.0 == prev.portraits && pool == prev.pool;
     let settled = capture.is_none()
         && prev.dims == Some(dims)
         && prev.generation == generation
         && text_ui == prev.text_ui
-        && booths.images.0 == prev.portraits
+        && portraits_eq
         && extracted == prev.extracted;
     if settled {
         drop(extract_span);
@@ -724,7 +729,7 @@ pub(super) fn paint_script(
             prev.dims == Some(dims),
             prev.generation == generation,
             text_ui == prev.text_ui,
-            booths.images.0 == prev.portraits,
+            portraits_eq,
         );
     }
     // ── The per-entry splice ─────────────────────────────────────────────────────────────────
@@ -755,8 +760,8 @@ pub(super) fn paint_script(
         if text_ui != prev.text_ui {
             no_splice!("focused editbox text-ui moved");
         }
-        if booths.images.0 != prev.portraits {
-            no_splice!("portrait sources moved");
+        if !portraits_eq {
+            no_splice!("portrait sources or pane dressing rooms moved");
         }
         // The spans describe last conversion's list; if anything replaced it, convert in full.
         if prev.spans.len() != prev.extracted.len()
@@ -943,6 +948,7 @@ pub(super) fn paint_script(
     prev.generation = generation;
     prev.text_ui = text_ui.clone();
     prev.portraits = booths.images.0.clone();
+    prev.pool = pool;
     prev.extracted = extracted.clone();
     // Cleared only on the full-conversion path: a settled frame's map is still true, and
     // clearing it would put the body panes' cameras to sleep.
@@ -1185,7 +1191,13 @@ fn convert_entry(
                 }
                 return;
             }
-            let Some(slot) = name.as_deref().and_then(crate::portrait::model_pane_booth) else {
+            // A pane no stock window claims samples its own dressing room's booth, if it has one.
+            let Some(slot) = name
+                .as_deref()
+                .and_then(crate::portrait::model_pane_booth)
+                .map(str::to_string)
+                .or_else(|| booths.pool.slot_of(handle).map(crate::portrait::pool_slot))
+            else {
                 return;
             };
             // The aspect is published before the readiness check: the bake waits on the publish.
@@ -1193,10 +1205,10 @@ fn convert_entry(
                 booths
                     .panes
                     .0
-                    .insert(slot.to_string(), rect.width() / rect.height());
+                    .insert(slot.clone(), rect.width() / rect.height());
             }
             // The bake is premultiplied; the 2D stand-in while a model streams is straight alpha.
-            let (handle, premultiplied) = match booths.images.0.get(slot) {
+            let (handle, premultiplied) = match booths.images.0.get(&slot) {
                 Some(PortraitSource::Live(h)) => (Some(h.clone()), true),
                 Some(PortraitSource::File(p)) => (
                     assets.as_mut().and_then(|a| a.sprite_texture(p, images)),
@@ -1672,6 +1684,7 @@ mod clip_plumb_tests {
         app.init_resource::<Assets<Image>>();
         app.init_resource::<PortraitImages>();
         app.init_resource::<crate::portrait::BoothPanes>();
+        app.init_resource::<crate::portrait::PaneDressUps>();
         app.init_resource::<crate::ui_models::UiModelTiles>();
         app.init_resource::<crate::minimap::MinimapWidget>();
         app.init_resource::<crate::ui_script::UiFrameCost>();
@@ -1758,6 +1771,7 @@ mod clip_plumb_tests {
         app.init_resource::<Assets<Image>>();
         app.init_resource::<PortraitImages>();
         app.init_resource::<crate::portrait::BoothPanes>();
+        app.init_resource::<crate::portrait::PaneDressUps>();
         app.init_resource::<crate::ui_models::UiModelTiles>();
         app.init_resource::<crate::minimap::MinimapWidget>();
         app.init_resource::<crate::ui_script::UiFrameCost>();
@@ -1952,6 +1966,7 @@ mod extract_gate_tests {
         app.init_resource::<Assets<Image>>();
         app.init_resource::<PortraitImages>();
         app.init_resource::<crate::portrait::BoothPanes>();
+        app.init_resource::<crate::portrait::PaneDressUps>();
         app.init_resource::<crate::ui_models::UiModelTiles>();
         app.init_resource::<crate::minimap::MinimapWidget>();
         app.init_resource::<crate::ui_script::UiFrameCost>();
@@ -2072,6 +2087,59 @@ mod extract_gate_tests {
             (aspect - 233.0 / 224.0).abs() < 0.01,
             "the pane's own rect is the aspect, got {aspect}"
         );
+    }
+
+    /// A `<DressUpModel>` no stock window claims draws through a pool booth the dressing-room feed
+    /// claims a frame after the pane first converts, as Turtle's transmog doll and tiles do. With
+    /// nothing else moving, the claim alone must reopen the gate, or the pane stays empty until a
+    /// click converts the UI again.
+    #[test]
+    fn a_pool_claim_after_the_window_converted_reopens_the_gate() {
+        let mut app = app_from_script(
+            r#"
+            local tile = CreateFrame("DressUpModel", "TransmogLook1ItemModel")
+            tile:SetPoint("TOPLEFT", 0, 0)
+            tile:SetWidth(80); tile:SetHeight(107)
+            tile:SetUnit("player")
+        "#,
+        );
+        let pane = app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .take_dressup_intents()
+            .first()
+            .expect("SetUnit queues the pane's rebuild")
+            .0;
+        let bake = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(Image::default());
+        app.world_mut().resource_mut::<PortraitImages>().0.insert(
+            crate::portrait::pool_slot(0),
+            crate::portrait::PortraitSource::Live(bake.clone()),
+        );
+        let draws = |app: &App| {
+            app.world()
+                .resource::<UiQuads>()
+                .quads
+                .iter()
+                .any(|q| q.texture.as_ref() == Some(&bake))
+        };
+        app.update();
+        app.update();
+        assert!(!draws(&app), "an unclaimed pane draws nothing");
+        app.world_mut().resource_mut::<UiQuads>().dirty = false;
+
+        app.world_mut()
+            .resource_mut::<crate::portrait::PaneDressUps>()
+            .0[0]
+            .pane = Some(pane);
+        app.update();
+        assert!(
+            draws(&app),
+            "the claim alone converts the pane onto its booth"
+        );
+        assert!(app.world().resource::<UiQuads>().dirty);
     }
 
     /// The shader's `select(a, k, premultiplied)` is right only if exactly the render-target quads

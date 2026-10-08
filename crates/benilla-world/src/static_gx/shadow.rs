@@ -77,7 +77,7 @@ impl StaticGx {
                         .map(|p| t.transform_point(wow_to_bevy(*p)).to_array()),
                 );
                 let added = positions.len() as u32 - base;
-                for tri in item.geometry.indices.chunks_exact(3) {
+                for tri in item.geometry.indices.as_chunks::<3>().0 {
                     if tri.iter().all(|i| *i < added) {
                         indices.extend(tri.iter().map(|i| base + *i));
                     }
@@ -113,7 +113,8 @@ impl StaticGx {
                 if !item.cutout {
                     continue;
                 }
-                let (Some(texture_id), Some(texture)) = (item.texture, item.texture_handle.as_ref())
+                let (Some(texture_id), Some(texture)) =
+                    (item.texture, item.texture_handle.as_ref())
                 else {
                     continue;
                 };
@@ -143,7 +144,7 @@ impl StaticGx {
                 );
                 bucket.uvs.extend_from_slice(&geometry.uvs);
                 let added = bucket.positions.len() as u32 - base;
-                for tri in geometry.indices.chunks_exact(3) {
+                for tri in geometry.indices.as_chunks::<3>().0 {
                     if tri.iter().all(|i| *i < added) {
                         bucket.indices.extend(tri.iter().map(|i| base + *i));
                     }

@@ -213,6 +213,27 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // is its name string): a friendly cast that binds nothing falls back to the caster.
     // `TOGGLEAUTOSELFCAST` toggles it.
     same("autoSelfCast", "0"),
+    // The spell queue, benilla's own: the knob is [`crate::spell::inflight::PendingCast`]. The reference
+    // holds the next cast until the server resolves the last (`0xceca88`, cleared at `0x6e7408`).
+    ours(
+        "spellQueue",
+        "0",
+        "benilla's own, off by default — the reference waits one round trip for the server's \
+         resolution before the next cast; on, a timed cast's guard opens on the local timer",
+    ),
+    ours(
+        "spellQueueBufferMs",
+        "55",
+        "benilla's own — the spell queue's margin past the local cast end for the server's tick, \
+         nampower's 55 ms default",
+    ),
+    ours(
+        "SpellQueueWindow",
+        "400",
+        "a later client's name and default (the retail spell queue window): with spellQueue on, \
+         a press this many ms before a cast or cooldown ends is held and sent when it ends; 1.12 \
+         refuses it",
+    ),
     // The five saved camera views and the live index, at the reference's names and default strings;
     // owned by [`crate::player::camera_view`]. Registered so a `SaveView` persists.
     same(
@@ -658,7 +679,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ours(
         "characterShadowRate",
         "30",
-        "benilla's own: Hz cap on the character shadow proxy re-skin+upload, 0..120 (0 = per frame)",
+        "benilla's own: no effect (character shadows skin on the GPU every frame); kept until retired",
     ),
     ours(
         "worldShadowRate",

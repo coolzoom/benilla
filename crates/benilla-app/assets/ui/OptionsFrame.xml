@@ -428,6 +428,27 @@
             .. "There is no exclusive fullscreen mode. WoW itself removed one in 8.0.1, and "
             .. "modern Classic offers these same two."
 
+        -- 1.12 has no spell queue: it waits for the server before every next cast.
+        BENILLA_TOOLTIP_SPELL_QUEUE =
+            "Lets your next spell start as soon as your cast bar finishes, instead of waiting "
+            .. "for the server to confirm the last one.\n\n"
+            .. "The original client waits a full round trip after every cast, so with 150 ms of "
+            .. "latency each cast takes 150 ms longer than its cast time. Instant spells are "
+            .. "unaffected; they already follow the global cooldown."
+
+        BENILLA_TOOLTIP_SPELL_QUEUE_WINDOW =
+            "How early you can press your next spell while a cast or cooldown is finishing.\n\n"
+            .. "A press inside this window is remembered and goes out the moment it is allowed, "
+            .. "so you never have to time the end of a cast bar. Retail WoW's default is 400 ms; "
+            .. "0 turns the queue off and leaves only the faster cast start."
+
+        BENILLA_TOOLTIP_SPELL_QUEUE_BUFFER =
+            "How long past the end of your cast bar Spell Queue waits before the next spell may "
+            .. "go out.\n\n"
+            .. "The server only processes spells on its tick, so a cast sent too early is refused "
+            .. "with \"Another action is in progress\". Raise this if you see that error; lower it "
+            .. "to cast sooner."
+
         -- 1.12's GAMMA text points at gray-bar art this page does not have.
         BENILLA_TOOLTIP_BRIGHTNESS =
             "Lightens or darkens the whole picture — nights, caves and interiors are what it is "
@@ -1024,6 +1045,7 @@
                 "RowCameraFollowStyle", "RowFollowTerrain", "RowHeadBob",
                 "RowAutoFollowSpeed", "RowWaterCollision", "RowSmartPivot",
                 "RowMouseLookSpeed", "RowMaxCameraDistance",
+                "RowSpellQueue", "RowSpellQueueWindow", "RowSpellQueueBuffer",
             },
             Audio = {
                 "RowEnableAll", "RowMaster", "RowSound", "RowMusic", "RowAmbience",
@@ -1223,6 +1245,16 @@
         -- UIOptionsFrame.lua:193-227 re-applies saved uvars, so this window has no load ladder.
 
         -- OptionsFrameSliders is the stock table (OptionsFrame.lua:24-34), which addons write.
+        -- Turtle replaces that file and does not declare the table, so retain the six stock
+        -- bounds this window consumes. Vanilla keeps the live table, including addon writes.
+        BENILLA_GRAPHICS_SLIDERS = OptionsFrameSliders or {
+            { minValue = 0.64, maxValue = 1.0, valueStep = 0.01 },
+            { minValue = 177, maxValue = 777, valueStep = 60 },
+            { minValue = 0, maxValue = 2, valueStep = 1 },
+            [6] = { minValue = -0.5, maxValue = 0.5, valueStep = 0.1 },
+            [8] = { minValue = 0, maxValue = 2, valueStep = 1 },
+            [9] = { minValue = 0, maxValue = 3, valueStep = 1 },
+        }
         -- Holes at 4, 5 and 7, so the OnShow loop uses the pairs form: ipairs would stop at 3.
         BENILLA_GRAPHICS_SLIDER_ROWS = {
             "RowUiScale", "RowFarclip", "RowWorldDetail",
@@ -1310,6 +1342,9 @@
         function BenillaOptionsRow_FormatValue(row, value)
             if row.fmt == "raw" then
                 return string.format("%d", math.floor(value + 0.5))
+            end
+            if row.fmt == "ms" then
+                return string.format("%d ms", math.floor(value + 0.5))
             end
             -- The clamp guards a short stops table.
             if row.stops then
@@ -1566,6 +1601,10 @@
                 local style = GetCVar("cameraSmoothStyle")
                 BenillaOptionsRow_SetEnabled(BenillaOptionsFrameContainerBodyControlsRowAutoFollowSpeed,
                     style ~= "0" and style ~= "3")
+                BenillaOptionsRow_SetEnabled(BenillaOptionsFrameContainerBodyControlsRowSpellQueueBuffer,
+                    GetCVar("spellQueue") == "1")
+                BenillaOptionsRow_SetEnabled(BenillaOptionsFrameContainerBodyControlsRowSpellQueueWindow,
+                    GetCVar("spellQueue") == "1")
                 return
             end
             if key == "Nameplates" then
@@ -2468,6 +2507,39 @@
                                                 BenillaOptionsSliderRow_Setup(this, 1.0, 2.0, 0.1, "yards")
                                             </OnLoad></Scripts>
                                         </Frame>
+                                        <!-- 1.12 has no spell queue; the buffer greys out with it off. -->
+                                        <Frame name="$parentRowSpellQueue" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowMaxCameraDistance" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowMaxCameraDistance" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "spellQueue", "Spell Queue",
+                                                    "BENILLA_TOOLTIP_SPELL_QUEUE")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowSpellQueueWindow" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowSpellQueue" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowSpellQueue" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "SpellQueueWindow", "Spell Queue Window",
+                                                    "BENILLA_TOOLTIP_SPELL_QUEUE_WINDOW")
+                                                BenillaOptionsSliderRow_Setup(this, 0, 400, 10, "ms")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowSpellQueueBuffer" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowSpellQueueWindow" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowSpellQueueWindow" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "spellQueueBufferMs", "Spell Queue Buffer",
+                                                    "BENILLA_TOOLTIP_SPELL_QUEUE_BUFFER")
+                                                BenillaOptionsSliderRow_Setup(this, 0, 200, 5, "ms")
+                                            </OnLoad></Scripts>
+                                        </Frame>
                                     </Frames>
                                 </Frame>
                                 <!-- The three volumes are children of Master. -->
@@ -2596,9 +2668,9 @@
                                             <Scripts><OnLoad>
                                                 BenillaOptionsRow_OnLoad(this, "uiScale", "UI Scale",
                                                     "OPTION_TOOLTIP_UI_SCALE")
-                                                BenillaOptionsSliderRow_Setup(this, OptionsFrameSliders[1].minValue,
-                                                    OptionsFrameSliders[1].maxValue,
-                                                    OptionsFrameSliders[1].valueStep)
+                                                BenillaOptionsSliderRow_Setup(this, BENILLA_GRAPHICS_SLIDERS[1].minValue,
+                                                    BENILLA_GRAPHICS_SLIDERS[1].maxValue,
+                                                    BENILLA_GRAPHICS_SLIDERS[1].valueStep)
                                                 -- A live write would rescale the slider mid-drag.
                                                 this.deferred = 1
                                             </OnLoad></Scripts>
@@ -2611,9 +2683,9 @@
                                             <Scripts><OnLoad>
                                                 BenillaOptionsRow_OnLoad(this, "farclip", "Terrain Distance",
                                                     "OPTION_TOOLTIP_FARCLIP")
-                                                BenillaOptionsSliderRow_Setup(this, OptionsFrameSliders[2].minValue,
-                                                    OptionsFrameSliders[2].maxValue,
-                                                    OptionsFrameSliders[2].valueStep, "raw")
+                                                BenillaOptionsSliderRow_Setup(this, BENILLA_GRAPHICS_SLIDERS[2].minValue,
+                                                    BENILLA_GRAPHICS_SLIDERS[2].maxValue,
+                                                    BENILLA_GRAPHICS_SLIDERS[2].valueStep, "raw")
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowWorldDetail" inherits="BenillaOptionsSliderRowTemplate">
@@ -2625,9 +2697,9 @@
                                                 BenillaOptionsRow_OnLoad(this, "WorldDetail", "Environment Detail",
                                                     "OPTION_TOOLTIP_ENVIRONMENT_DETAIL")
                                                 -- Stop names from the era quality ladder.
-                                                BenillaOptionsSliderRow_Setup(this, OptionsFrameSliders[3].minValue,
-                                                    OptionsFrameSliders[3].maxValue,
-                                                    OptionsFrameSliders[3].valueStep, nil,
+                                                BenillaOptionsSliderRow_Setup(this, BENILLA_GRAPHICS_SLIDERS[3].minValue,
+                                                    BENILLA_GRAPHICS_SLIDERS[3].maxValue,
+                                                    BENILLA_GRAPHICS_SLIDERS[3].valueStep, nil,
                                                     { "Low", "Medium", "High" })
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -2643,9 +2715,9 @@
                                                     "OPTION_TOOLTIP_SPELL_DETAIL")
                                                 -- Our names for the handler's emission scalars
                                                 -- 0.33, 0.66 and 1.0 (`0x689510`).
-                                                BenillaOptionsSliderRow_Setup(this, OptionsFrameSliders[8].minValue,
-                                                    OptionsFrameSliders[8].maxValue,
-                                                    OptionsFrameSliders[8].valueStep, nil,
+                                                BenillaOptionsSliderRow_Setup(this, BENILLA_GRAPHICS_SLIDERS[8].minValue,
+                                                    BENILLA_GRAPHICS_SLIDERS[8].maxValue,
+                                                    BENILLA_GRAPHICS_SLIDERS[8].valueStep, nil,
                                                     { "Low", "Medium", "High" })
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -2664,9 +2736,9 @@
                                                 BenillaOptionsNumFuncRow_OnLoad(this, GetGamma, SetGamma,
                                                     tostring(1 - gd), "Brightness",
                                                     "BENILLA_TOOLTIP_BRIGHTNESS")
-                                                BenillaOptionsSliderRow_Setup(this, OptionsFrameSliders[6].minValue,
-                                                    OptionsFrameSliders[6].maxValue,
-                                                    OptionsFrameSliders[6].valueStep, "travel")
+                                                BenillaOptionsSliderRow_Setup(this, BENILLA_GRAPHICS_SLIDERS[6].minValue,
+                                                    BENILLA_GRAPHICS_SLIDERS[6].maxValue,
+                                                    BENILLA_GRAPHICS_SLIDERS[6].valueStep, "travel")
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- On the CVar, as 1.12's lands: there is no
@@ -2681,9 +2753,9 @@
                                                     "OPTION_TOOLTIP_WEATHER_DETAIL")
                                                 -- Our names for `0x67b870`'s spawn-rate gains
                                                 -- `{0.1, 0.33, 0.66, 1.0}` (`[0x8680ec]`).
-                                                BenillaOptionsSliderRow_Setup(this, OptionsFrameSliders[9].minValue,
-                                                    OptionsFrameSliders[9].maxValue,
-                                                    OptionsFrameSliders[9].valueStep, nil,
+                                                BenillaOptionsSliderRow_Setup(this, BENILLA_GRAPHICS_SLIDERS[9].minValue,
+                                                    BENILLA_GRAPHICS_SLIDERS[9].maxValue,
+                                                    BENILLA_GRAPHICS_SLIDERS[9].valueStep, nil,
                                                     { "Minimal", "Low", "Medium", "Full" })
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -2745,7 +2817,7 @@
                                     <Scripts>
                                         <OnShow>
                                             for i, name in BENILLA_GRAPHICS_SLIDER_ROWS do
-                                                local info = OptionsFrameSliders[i]
+                                                local info = BENILLA_GRAPHICS_SLIDERS[i]
                                                 local row = getglobal(this:GetName() .. name)
                                                 if ( info and row ) then
                                                     BenillaOptionsSliderRow_Setup(row, info.minValue, info.maxValue,
@@ -2760,7 +2832,7 @@
                                      reach. Nothing here is a new mechanism: every row is a seat on
                                      a CVar this client already registers, reads per frame and
                                      persists, and the page is built out of the same three row
-                                     templates and the same OptionsRow_* store as every page above
+                                     templates and the same BenillaOptionsRow_* store as every page above
                                      it. What it adds is a way in — before it, a player build had
                                      none, because the native lighting panel is a dev-build window
                                      and `/console` is not a setting.

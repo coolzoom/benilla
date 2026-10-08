@@ -35,7 +35,9 @@ use dress::{spawn_group, PartDress};
 pub(super) use merge::MergedFormsCache;
 mod preview;
 pub(crate) use preview::equip_slot;
-pub(super) use preview::{build_dressup_preview, build_glue_pet, build_glue_preview};
+pub(super) use preview::{
+    build_dressup_preview, build_glue_pet, build_glue_preview, build_pane_dressups,
+};
 #[cfg(test)]
 mod arrival_tests;
 mod redress;
@@ -804,9 +806,13 @@ pub(super) fn attach_entity_visuals(
             // stands still, so it stays eligible. `net.kind` is the only place the two are told
             // apart: downstream both are just a `PointLight` under a `ChildOf`.
             let body_carried = !matches!(net.kind, EntityKind::GameObject);
-            super::spawn_carried_lights(&mut commands, model_lights, entity, body_carried, |bone| {
-                light_anchors.get(&bone).copied()
-            });
+            super::spawn_carried_lights(
+                &mut commands,
+                model_lights,
+                entity,
+                body_carried,
+                |bone| light_anchors.get(&bone).copied(),
+            );
             // Ribbon trails, on the same host-bone ride; each despawns with its owner.
             {
                 for rb in dm.map(|d| d.ribbons.as_slice()).unwrap_or_default() {

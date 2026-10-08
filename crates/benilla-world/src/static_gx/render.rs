@@ -37,6 +37,7 @@ use std::ops::Range;
 
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::core_pipeline::core_3d::CORE_3D_DEPTH_FORMAT;
+use bevy::core_pipeline::prepass::ViewPrepassTextures;
 
 /// One baked item's draw facts, in bake order: the vertex word's low bits index its record.
 #[derive(Clone)]
@@ -227,14 +228,14 @@ struct GxPipelines {
     torch_layout: BindGroupLayoutDescriptor,
     sampler: Sampler,
     sampler_clamp: Sampler,
-    /// Keyed `(cutout, two_sided)`, re-specialized if the world view's (samples, format) changes.
+    /// Keyed `(cutout, two_sided)`, re-specialized if the world view's (view layout, format) changes.
     pipelines: HashMap<(bool, bool), CachedRenderPipelineId>,
     /// MONKEY (sun shadow perf): the key now carries the live `shadowFilter` too — the PCF branch
     /// is a shader DEF, so a change has to re-specialize the family. Once per CHANGE, not per
     /// frame: exactly the posture the (samples, format) pair beside it already has, and the same
     /// caveat (a flip re-queues four pipelines rather than reviving the previous four — a cvar
     /// A/B costs a shader build, a rendered frame costs nothing).
-    specialized_for: Option<(u32, TextureFormat, bool)>,
+    specialized_for: Option<(MeshPipelineViewLayoutKey, TextureFormat, bool)>,
 }
 
 fn init_pipelines(
@@ -332,12 +333,14 @@ fn init_pipelines(
     // MONKEY (room gate): the claim table's persistent GPU buffer, written every frame by
     // `prepare_room_claims`. Created here (RenderStartup) rather than beside the shared light
     // buffer so the whole binding — layout, buffer, upload — lives with its one reader.
-    commands.insert_resource(GxRoomClaims(render_device.create_buffer(&BufferDescriptor {
-        label: Some("static_gx_room_claims"),
-        size: crate::lighting::room_claim_bytes(),
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    })));
+    commands.insert_resource(GxRoomClaims(render_device.create_buffer(
+        &BufferDescriptor {
+            label: Some("static_gx_room_claims"),
+            size: crate::lighting::room_claim_bytes(),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        },
+    )));
     commands.insert_resource(GxPipelines {
         view_layout,
         cell_layout,
@@ -356,6 +359,7 @@ type GxViewKey = (
     &'static Msaa,
     &'static ViewTarget,
     &'static StaticGxView,
+    Option<&'static ViewPrepassTextures>,
 );
 
 /// The bake's interleaved vertex layout, in the attribute-id order Bevy interleaves by: position,
@@ -419,9 +423,9 @@ fn prepare_static_gx(
     // (a bare static_gx harness has no lighting) — absent reads as the shipped Gaussian.
     shadow_filter: Option<Res<crate::lighting::ShadowFilterGaussian>>,
 ) {
-    let shadow_gaussian = shadow_filter.map_or(true, |f| f.0);
+    let shadow_gaussian = shadow_filter.is_none_or(|f| f.0);
     let _t = super::gx_perf_guard(3);
-    let Some((view, msaa, _, _)) = views.iter().next() else {
+    let Some((view, msaa, _, _, prepass)) = views.iter().next() else {
         return;
     };
     let format = if view.hdr {
@@ -429,12 +433,13 @@ fn prepare_static_gx(
     } else {
         TextureFormat::bevy_default()
     };
-    let key = (msaa.samples(), format, shadow_gaussian);
+    // The view bind group Bevy prepares is keyed on MSAA and the view's prepass textures (the
+    // motion-vector prepass adds bindings 20 and 22); the pipeline must claim the same layout.
+    let view_key =
+        MeshPipelineViewLayoutKey::from(*msaa) | MeshPipelineViewLayoutKey::from(prepass);
+    let key = (view_key, format, shadow_gaussian);
     if pipes.specialized_for != Some(key) {
-        pipes.view_layout = mesh_pipeline
-            .get_view_layout(MeshPipelineViewLayoutKey::from(*msaa))
-            .main_layout
-            .clone();
+        pipes.view_layout = mesh_pipeline.get_view_layout(view_key).main_layout.clone();
         let shader: Handle<Shader> =
             asset_server.load("embedded://benilla_world/shaders/static_gx.wgsl");
         pipes.pipelines.clear();
@@ -855,7 +860,10 @@ fn prepare_room_claims(
     // copy it saves, and the comparison is against what we WROTE, so it cannot disagree with the
     // buffer's real contents.
     let id = buffer.0.id();
-    if last.as_ref().is_some_and(|(b, w)| *b == id && w[..] == claims.0[..]) {
+    if last
+        .as_ref()
+        .is_some_and(|(b, w)| *b == id && w[..] == claims.0[..])
+    {
         return;
     }
     queue.write_buffer(&buffer.0, 0, bytemuck::cast_slice(&claims.0[..]));
@@ -885,10 +893,7 @@ fn prepare_view_bind(
     commands.insert_resource(GxLightBind(render_device.create_bind_group(
         "static_gx_light",
         &layout,
-        &BindGroupEntries::sequential((
-            light.0.as_entire_binding(),
-            claims.0.as_entire_binding(),
-        )),
+        &BindGroupEntries::sequential((light.0.as_entire_binding(), claims.0.as_entire_binding())),
     )));
 }
 
@@ -946,16 +951,28 @@ fn prepare_torch_bind(
         }
         // Rebuild in place — one `Res` write instead of a deferred `insert_resource` per frame.
         *cached = GxTorchBind {
-            group: build_torch_bind(&pipes, &pipeline_cache, &render_device, gpu_image,
-                targets.sampler(), &table),
+            group: build_torch_bind(
+                &pipes,
+                &pipeline_cache,
+                &render_device,
+                gpu_image,
+                targets.sampler(),
+                &table,
+            ),
             table,
             texture,
         };
         return;
     }
     commands.insert_resource(GxTorchBind {
-        group: build_torch_bind(&pipes, &pipeline_cache, &render_device, gpu_image,
-            targets.sampler(), &table),
+        group: build_torch_bind(
+            &pipes,
+            &pipeline_cache,
+            &render_device,
+            gpu_image,
+            targets.sampler(),
+            &table,
+        ),
         table,
         texture,
     });
@@ -1012,6 +1029,8 @@ impl ViewNode for StaticGxNode {
         &'static MeshViewBindGroup,
         // The world camera only — a booth bake must never receive world cells (see the marker).
         &'static StaticGxView,
+        &'static Msaa,
+        Option<&'static ViewPrepassTextures>,
     );
 
     fn run<'w>(
@@ -1030,6 +1049,8 @@ impl ViewNode for StaticGxNode {
             maybe_oit,
             view_bind,
             _marker,
+            msaa,
+            prepass,
         ): QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
@@ -1040,6 +1061,14 @@ impl ViewNode for StaticGxNode {
         }
         let cache = world.resource::<GxGpuCache>();
         let pipes = world.resource::<GxPipelines>();
+        // `prepare_static_gx` keys on the prepass textures before this frame's are inserted, so
+        // the frame a camera's prepasses change, its pipelines claim last frame's view layout;
+        // drawing then would fail validation against this frame's view bind group.
+        let view_key =
+            MeshPipelineViewLayoutKey::from(*msaa) | MeshPipelineViewLayoutKey::from(prepass);
+        if pipes.specialized_for.map(|(key, _, _)| key) != Some(view_key) {
+            return Ok(());
+        }
         let pipeline_cache = world.resource::<PipelineCache>();
         let Some(light_bind) = world.get_resource::<GxLightBind>() else {
             return Ok(());

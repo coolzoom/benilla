@@ -23,11 +23,14 @@
 //!
 //! The rig deliberately does NOT put a directional light on the normal world layer: that would make
 //! every existing WoW material enter Bevy's shadow-prepass path, the source of the pipeline
-//! corruption seen during the first experiment. Only the private-layer proxy casts.
+//! corruption seen during the first experiment. Bevy runs a material's `specialize` on the prepass
+//! descriptor too, and `WowModelExt::specialize` rewrites the vertex layout to forward-pass
+//! locations (normal at 1, joints at 10/11) that Bevy's prepass shader does not read (UV at 1).
+//! Only the private-layer proxies cast, each with a material that owns both of its layouts.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::ecs::entity::EntityHashSet;
 use bevy::camera::visibility::{NoFrustumCulling, RenderLayers};
+use bevy::ecs::entity::EntityHashSet;
 use bevy::light::{
     CascadeShadowConfigBuilder, DirectionalLight, DirectionalLightShadowMap, NotShadowReceiver,
     ShadowFilteringMethod,
@@ -50,8 +53,8 @@ use benilla_world::interact::PickMesh;
 // this one directional light is aimed at. Imported rather than mirrored so the aim and the packed
 // weight can never disagree about which map the receivers are reading.
 use benilla_world::lighting::{
-    moon_shadow_weight, sun_shadow_strength, MoonShadowStrength, ShadowBody, ShadowHandover,
-    ShadowDistance, ShadowFilterGaussian, WowLighting,
+    moon_shadow_weight, sun_shadow_strength, MoonShadowStrength, ShadowBody, ShadowDistance,
+    ShadowFilterGaussian, ShadowHandover, WowLighting,
 };
 use benilla_world::model_render::{ModelKind, ModelPart, ShadowOccluder};
 use benilla_world::rig_palette::{RigPalettes, RigPart, RigSkin};
@@ -86,9 +89,10 @@ pub(crate) const STATIC_REBUILD_STEP: f32 = 16.0;
 // biggest line item. The cost splits three ways and each dial takes one of them:
 //   * the shadow PASS's fill + its depth texture .... `shadowMapSize` (quadratic in the edge)
 //   * the RECEIVERS' PCF fetches ..................... `shadowFilter`  (9 samples vs 1)
-//   * the CPU caster rebuild + GPU re-upload ......... `characterShadowRate` / `worldShadowRate`
-// and `shadowCasterReach` trims the caster POPULATION those rebuilds walk. All live: nothing here
-// is latched at boot, so the user A/Bs the whole set from one chat line.
+//   * the world lane's CPU caster rebuild + re-upload  `worldShadowRate`
+// and `shadowCasterReach` trims the caster POPULATION those rebuilds walk. (The character lane
+// has no rebuild: its proxies skin on the GPU, so `characterShadowRate` no longer prices it.)
+// All live: nothing here is latched at boot, so the user A/Bs the whole set from one chat line.
 // -------------------------------------------------------------------------------------------
 
 /// The `shadowMapSize` ladder. Powers of two only — Bevy's `validate_shadow_map_size` rounds a
@@ -129,7 +133,10 @@ pub(crate) const CASTER_REACH_RANGE: std::ops::RangeInclusive<f32> = 0.25..=2.0;
 /// Snap a requested `shadowMapSize` onto [`SHADOW_MAP_SIZES`] — nearest in LOG space, so 1500 lands
 /// on 1024 and 3000 on 4096 (halfway in ratio, not in texels, is what "one step" means here).
 pub(crate) fn clamp_shadow_map_size(asked: u32) -> u32 {
-    let asked = asked.clamp(SHADOW_MAP_SIZES[0], SHADOW_MAP_SIZES[SHADOW_MAP_SIZES.len() - 1]);
+    let asked = asked.clamp(
+        SHADOW_MAP_SIZES[0],
+        SHADOW_MAP_SIZES[SHADOW_MAP_SIZES.len() - 1],
+    );
     *SHADOW_MAP_SIZES
         .iter()
         .min_by(|a, b| {
@@ -164,7 +171,9 @@ impl RebuildRate {
         }
         let interval = 1.0 / rate as f32;
         // `now < last` (a time reset) is treated as due rather than as a very long wait.
-        let due = self.last.is_none_or(|last| now - last >= interval || now < last);
+        let due = self
+            .last
+            .is_none_or(|last| now - last >= interval || now < last);
         if due {
             self.last = Some(now);
         }
@@ -252,11 +261,10 @@ fn shadow_sun_travel(to_sun: Vec3) -> Vec3 {
     } else {
         Vec3::NEG_Z
     };
-    let elevation = s
-        .y
-        .clamp(-1.0, 1.0)
-        .asin()
-        .clamp(MIN_SHADOW_SUN_ELEVATION, MAX_SHADOW_SUN_ELEVATION);
+    let elevation =
+        s.y.clamp(-1.0, 1.0)
+            .asin()
+            .clamp(MIN_SHADOW_SUN_ELEVATION, MAX_SHADOW_SUN_ELEVATION);
     let to_sun_clamped = bearing * elevation.cos() + Vec3::Y * elevation.sin();
     -to_sun_clamped
 }
@@ -333,6 +341,12 @@ pub(crate) struct ShadowCorePlugin;
 pub(crate) struct ShadowCasterMaterial {}
 
 impl Material for ShadowCasterMaterial {
+    // Shadow pass only: the world camera's depth/motion prepass would draw the proxy into the
+    // view's depth and occlude the visible model it shadows for.
+    fn enable_prepass() -> bool {
+        false
+    }
+
     fn fragment_shader() -> ShaderRef {
         "embedded://benilla_app/shaders/shadow_caster.wgsl".into()
     }
@@ -359,24 +373,27 @@ impl Plugin for ShadowCorePlugin {
         app.insert_resource(DirectionalLightShadowMap {
             size: DEFAULT_SHADOW_MAP_SIZE as usize,
         })
-            .add_plugins(MaterialPlugin::<ShadowCasterMaterial>::default())
-            .init_resource::<ShadowRigState>()
-            .init_resource::<ShadowDemand>()
-            .init_resource::<ShadowFrame>()
-            // The rig runs before the lanes every frame; the lanes read the frame it publishes.
-            // MONKEY (moon shadows): after ALL Update work (lighting resolve + strength bridge),
-            // before this frame's transform propagation and light-buffer packing. Last was too
-            // late: a time jump had already packed the new body's weight over the old basis.
-            .configure_sets(PostUpdate, ShadowSet::Rig.before(bevy::transform::TransformSystems::Propagate))
-            // MONKEY (sun shadow perf): the quality dials land BEFORE the rig each frame, and
-            // unconditionally — a `shadowMapSize` write must take even while the lanes are off, so
-            // turning shadows back on doesn't render one frame at the previous size.
-            .add_systems(
-                PostUpdate,
-                (apply_shadow_quality, manage_rig)
-                    .chain()
-                    .in_set(ShadowSet::Rig),
-            );
+        .add_plugins(MaterialPlugin::<ShadowCasterMaterial>::default())
+        .init_resource::<ShadowRigState>()
+        .init_resource::<ShadowDemand>()
+        .init_resource::<ShadowFrame>()
+        // The rig runs before the lanes every frame; the lanes read the frame it publishes.
+        // MONKEY (moon shadows): after ALL Update work (lighting resolve + strength bridge),
+        // before this frame's transform propagation and light-buffer packing. Last was too
+        // late: a time jump had already packed the new body's weight over the old basis.
+        .configure_sets(
+            PostUpdate,
+            ShadowSet::Rig.before(bevy::transform::TransformSystems::Propagate),
+        )
+        // MONKEY (sun shadow perf): the quality dials land BEFORE the rig each frame, and
+        // unconditionally — a `shadowMapSize` write must take even while the lanes are off, so
+        // turning shadows back on doesn't render one frame at the previous size.
+        .add_systems(
+            PostUpdate,
+            (apply_shadow_quality, manage_rig)
+                .chain()
+                .in_set(ShadowSet::Rig),
+        );
     }
 }
 
@@ -449,6 +466,7 @@ fn apply_shadow_quality(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 fn manage_rig(
     state: Res<State<ClientState>>,
     video: Res<VideoConfig>,
@@ -467,7 +485,11 @@ fn manage_rig(
     mut commands: Commands,
     mut materials: ResMut<Assets<ShadowCasterMaterial>>,
     mut cameras: Query<
-        (Entity, Option<&mut RenderLayers>, Option<&ShadowCameraLayer>),
+        (
+            Entity,
+            Option<&mut RenderLayers>,
+            Option<&ShadowCameraLayer>,
+        ),
         With<WorldCamera>,
     >,
     mut suns: Query<(&mut Transform, &mut DirectionalLight), With<ShadowSun>>,
@@ -487,9 +509,13 @@ fn manage_rig(
     // MONKEY (moon shadows): publish zero immediately on a body change. Only the actual write
     // below acknowledges the basis; fresh spawns may need a deferred-command frame to get here.
     let sun_w = sun_shadow_strength(lighting.celestial_dir().y);
-    handover.request(sun_w,
+    handover.request(
+        sun_w,
         moon_shadow_weight(lighting.celestial_dir().y, lighting.moon_dir().y),
-        moon_strength.0, wanted, time.delta_secs());
+        moon_strength.0,
+        wanted,
+        time.delta_secs(),
+    );
     frame.suspended = sun_w <= 0.0 && moon_strength.0 <= 0.0;
 
     if !wanted {
@@ -523,9 +549,13 @@ fn manage_rig(
         rig.sun = None;
         rig.sun_written = None;
         *handover = ShadowHandover::default();
-        handover.request(sun_w,
+        handover.request(
+            sun_w,
             moon_shadow_weight(lighting.celestial_dir().y, lighting.moon_dir().y),
-            moon_strength.0, wanted, 0.0);
+            moon_strength.0,
+            wanted,
+            0.0,
+        );
     }
 
     if rig.material.is_none() {
@@ -670,8 +700,13 @@ pub(crate) fn spawn_solid_caster(
 
 /// Append a triangle list, dropping WHOLE triangles whose indices exceed the vertex range (filtering
 /// single indices out of a `TriangleList` rewires the rest of the submesh into garbage).
-pub(crate) fn append_triangles(source: &[u32], vertex_count: u32, base: u32, indices: &mut Vec<u32>) {
-    for triangle in source.chunks_exact(3) {
+pub(crate) fn append_triangles(
+    source: &[u32],
+    vertex_count: u32,
+    base: u32,
+    indices: &mut Vec<u32>,
+) {
+    for triangle in source.as_chunks::<3>().0 {
         if triangle.iter().all(|index| *index < vertex_count) {
             indices.extend(triangle.iter().map(|index| base + *index));
         }
@@ -728,7 +763,7 @@ pub(crate) fn empty_cutout_mesh() -> Mesh {
 /// the WORLD lane wants entity-resident environment (gameobjects, faded doodads, WMO props). Returns
 /// `(admitted, occluder-rejected)` for the trace. Range-gates before any vertex work. The `parts`
 /// query is written inline (not aliased) so a lane can pass its own identically-typed query.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn collect_entity_geometry(
     parts: &Query<
         (
@@ -811,7 +846,7 @@ pub(crate) fn collect_entity_geometry(
 /// ENVIRONMENT (gameobjects, faded doodads, WMO props) is OPAQUE only — a foliage leaf-card cast
 /// solid becomes a box; retained-world cutout is cast leaf-shaped by the world lane's alpha-tested
 /// material instead. Additive/transparent geometry never casts a solid shadow.
-fn casts_realtime_shadow(
+pub(crate) fn casts_realtime_shadow(
     kind: ModelKind,
     blend: ModelBlend,
     want_creatures: bool,
@@ -844,7 +879,7 @@ fn append_skinned(
         let (Some(joints), Some(weights)) = (pick.0.joints.get(index), pick.0.weights.get(index))
         else {
             let fallback = palette
-                .get(0)
+                .first()
                 .map(|matrix| matrix.transform_point3(wow_to_bevy(*position)))
                 .unwrap_or(Vec3::ZERO);
             positions.push(fallback.to_array());
@@ -878,16 +913,46 @@ mod tests {
     #[test]
     fn each_lane_admits_only_its_own_kinds() {
         // The character lane wants creatures (opaque + alpha-test), not environment.
-        assert!(casts_realtime_shadow(ModelKind::Creature, ModelBlend::Opaque, true, false));
-        assert!(casts_realtime_shadow(ModelKind::Creature, ModelBlend::AlphaTest, true, false));
-        assert!(!casts_realtime_shadow(ModelKind::Creature, ModelBlend::Blend, true, false));
-        assert!(!casts_realtime_shadow(ModelKind::Doodad, ModelBlend::Opaque, true, false));
+        assert!(casts_realtime_shadow(
+            ModelKind::Creature,
+            ModelBlend::Opaque,
+            true,
+            false
+        ));
+        assert!(casts_realtime_shadow(
+            ModelKind::Creature,
+            ModelBlend::AlphaTest,
+            true,
+            false
+        ));
+        assert!(!casts_realtime_shadow(
+            ModelKind::Creature,
+            ModelBlend::Blend,
+            true,
+            false
+        ));
+        assert!(!casts_realtime_shadow(
+            ModelKind::Doodad,
+            ModelBlend::Opaque,
+            true,
+            false
+        ));
         // The world lane wants environment (opaque only), not creatures.
         for kind in [ModelKind::GameObject, ModelKind::Doodad, ModelKind::Wmo] {
             assert!(casts_realtime_shadow(kind, ModelBlend::Opaque, false, true));
-            assert!(!casts_realtime_shadow(kind, ModelBlend::AlphaTest, false, true));
+            assert!(!casts_realtime_shadow(
+                kind,
+                ModelBlend::AlphaTest,
+                false,
+                true
+            ));
         }
-        assert!(!casts_realtime_shadow(ModelKind::Creature, ModelBlend::Opaque, false, true));
+        assert!(!casts_realtime_shadow(
+            ModelKind::Creature,
+            ModelBlend::Opaque,
+            false,
+            true
+        ));
     }
 
     #[test]
@@ -938,7 +1003,11 @@ mod tests {
 
         // Dusk, the frame the aim flips: the sun has just reached the horizon.
         let sun_down = -0.02_f32;
-        assert_eq!(sun_shadow_strength(sun_down), 0.0, "the sun casts nothing at the horizon");
+        assert_eq!(
+            sun_shadow_strength(sun_down),
+            0.0,
+            "the sun casts nothing at the horizon"
+        );
         // …and the moon is still under it (the shipped tables put moonrise ~1h45m later).
         let moon_under = -0.17_f32;
         assert_eq!(
@@ -949,7 +1018,11 @@ mod tests {
         );
         // While the sun is still up the moon is refused outright, whatever its elevation.
         assert!(sun_shadow_strength(0.5) > 0.0);
-        assert_eq!(moon_shadow_weight(0.5, 0.9), 0.0, "one body casts at a time");
+        assert_eq!(
+            moon_shadow_weight(0.5, 0.9),
+            0.0,
+            "one body casts at a time"
+        );
         // A high midnight moon does cast, and at full weight (the strength dial scales it later).
         assert_eq!(moon_shadow_weight(sun_down, 0.82), 1.0);
         // The aim itself: a below-horizon moon still travels DOWN, pinned at the floor elevation —
@@ -968,10 +1041,16 @@ mod tests {
         assert!(sun_snap_due(None, held), "first write always fires");
         let axis = Vec3::Y;
         let small = Quat::from_axis_angle(axis, SUN_SNAP_RADIANS * 0.5) * held;
-        assert!(!sun_snap_due(Some(held), small), "sub-threshold drift holds");
+        assert!(
+            !sun_snap_due(Some(held), small),
+            "sub-threshold drift holds"
+        );
         let large = Quat::from_axis_angle(axis, SUN_SNAP_RADIANS * 2.0) * held;
         assert!(sun_snap_due(Some(held), large), "over-threshold snaps");
-        assert!(!sun_snap_due(Some(large), large), "identical direction never rewrites");
+        assert!(
+            !sun_snap_due(Some(large), large),
+            "identical direction never rewrites"
+        );
     }
 
     #[test]
@@ -1003,8 +1082,14 @@ mod tests {
     fn the_rebuild_gate_paces_from_the_last_grant_and_first_call_is_always_due() {
         let mut gate = RebuildRate::default();
         assert!(gate.due(10.0, 30), "first call has nothing to show yet");
-        assert!(!gate.due(10.01, 30), "10 ms later is inside a 33 ms interval");
-        assert!(!gate.due(10.03, 30), "still inside, measured from the grant");
+        assert!(
+            !gate.due(10.01, 30),
+            "10 ms later is inside a 33 ms interval"
+        );
+        assert!(
+            !gate.due(10.03, 30),
+            "still inside, measured from the grant"
+        );
         assert!(gate.due(10.04, 30), "past 1/30 s — due again");
         assert!(!gate.due(10.05, 30), "the grant reset the clock");
         // A reset (the lane tore its caster down) re-arms immediately.
@@ -1024,7 +1109,10 @@ mod tests {
         let mut gate = RebuildRate::default();
         assert!(gate.due(100.0, 15));
         assert!(!gate.due(100.01, 15));
-        assert!(gate.due(0.0, 15), "a clock that went backwards is due, not stuck");
+        assert!(
+            gate.due(0.0, 15),
+            "a clock that went backwards is due, not stuck"
+        );
     }
 
     /// The map-size ladder snaps in LOG space, so "halfway" means halfway in ratio (1448 = √2·1024)
@@ -1036,8 +1124,16 @@ mod tests {
         assert_eq!(clamp_shadow_map_size(1024), 1024);
         assert_eq!(clamp_shadow_map_size(4096), 4096);
         assert_eq!(clamp_shadow_map_size(0), 1024, "clamped to the floor");
-        assert_eq!(clamp_shadow_map_size(99_999), 4096, "clamped to the ceiling");
-        assert_eq!(clamp_shadow_map_size(1500), 2048, "1500 is above the 1448 log midpoint");
+        assert_eq!(
+            clamp_shadow_map_size(99_999),
+            4096,
+            "clamped to the ceiling"
+        );
+        assert_eq!(
+            clamp_shadow_map_size(1500),
+            2048,
+            "1500 is above the 1448 log midpoint"
+        );
         assert_eq!(clamp_shadow_map_size(1400), 1024, "1400 < 1448");
         assert!(SHADOW_MAP_SIZES.iter().all(|s| s.is_power_of_two()));
         assert!(SHADOW_MAP_SIZES.contains(&DEFAULT_SHADOW_MAP_SIZE));

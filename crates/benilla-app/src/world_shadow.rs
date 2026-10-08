@@ -107,6 +107,12 @@ pub(crate) struct CutoutShadowCasterMaterial {
 }
 
 impl Material for CutoutShadowCasterMaterial {
+    // Shadow pass only: the world camera's depth/motion prepass would draw the proxy into the
+    // view's depth and occlude the visible model it shadows for.
+    fn enable_prepass() -> bool {
+        false
+    }
+
     fn fragment_shader() -> ShaderRef {
         // Forward pass: still fully invisible — the shared proxy fragment discards every fragment.
         "embedded://benilla_app/shaders/shadow_caster.wgsl".into()
@@ -167,7 +173,7 @@ impl WorldLane {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_world_shadows(
     video: Res<VideoConfig>,
     time: Res<Time>,
@@ -238,7 +244,9 @@ fn update_world_shadows(
     // Its own cvar rather than sharing `characterShadowRate`: this population barely moves, so it
     // tolerates a far lower rate than an animated crowd does, and a dial named for characters that
     // silently also governs the world is a trap for whoever reads this next.
-    let env_due = lane.env_rate.due(time.elapsed_secs(), video.world_shadow_rate);
+    let env_due = lane
+        .env_rate
+        .due(time.elapsed_secs(), video.world_shadow_rate);
     if let Some(handle) = lane.env_mesh.clone().filter(|_| env_due) {
         if let Some(mesh) = meshes.get_mut(&handle) {
             let (mut positions, mut indices) = take_mesh_buffers(mesh);
@@ -284,7 +292,7 @@ fn update_world_shadows(
     }
     let due = lane
         .static_rebuilt_at
-        .map_or(true, |at| at.distance(frame.light_position) > STATIC_REBUILD_STEP);
+        .is_none_or(|at| at.distance(frame.light_position) > STATIC_REBUILD_STEP);
     if !due {
         return;
     }
@@ -344,8 +352,14 @@ fn update_world_shadows(
                     ShadowCaster,
                 ))
                 .id();
-            lane.cutout
-                .insert(bucket.texture_id, CutoutCaster { entity, mesh, material });
+            lane.cutout.insert(
+                bucket.texture_id,
+                CutoutCaster {
+                    entity,
+                    mesh,
+                    material,
+                },
+            );
         }
         let mesh_handle = lane.cutout[&bucket.texture_id].mesh.clone();
         if let Some(mesh) = meshes.get_mut(&mesh_handle) {
@@ -414,9 +428,11 @@ mod streamed_refresh_tests {
     #[test]
     fn shadow_cache_refresh_runs_without_volumetric_fog_and_is_quiet_when_unchanged() {
         let mut app = App::new();
-        let mut video = VideoConfig::default();
-        video.volumetric_fog = 0;
-        video.world_shadows = false;
+        let video = VideoConfig {
+            volumetric_fog: 0,
+            world_shadows: false,
+            ..Default::default()
+        };
         app.insert_resource(video)
             .init_resource::<StaticGx>()
             .init_resource::<WorldLane>()
