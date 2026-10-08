@@ -1404,7 +1404,9 @@
         function BenillaOptionsRow_ShowTooltip(row)
             local text = row.tip and getglobal(row.tip)
             if text then
-                GameTooltip:SetOwner(getglobal(row:GetName() .. "Tip"), "ANCHOR_RIGHT", -10, 0)
+                -- Deviation: 1.12 anchors ANCHOR_RIGHT of the option; the long Advanced Graphics
+                -- texts then cover the rows below, so the plate takes the screen's default corner.
+                GameTooltip_SetDefaultAnchor(GameTooltip, getglobal(row:GetName() .. "Tip"))
                 GameTooltip:SetText(text, nil, nil, nil, nil, 1)
             else
                 -- Deviation: 1.12 returns early here; a mute row hides the last plate, so a
