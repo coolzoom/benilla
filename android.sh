@@ -361,7 +361,8 @@ write_device_env() {
         [ -n "${WOW_USER:-}" ] && echo "WOW_USER=$WOW_USER"
         [ -n "${WOW_PASS:-}" ] && echo "WOW_PASS=$WOW_PASS"
         [ -n "${WOW_CHAR:-}" ] && echo "WOW_CHAR=$WOW_CHAR"
-        echo "WOW_NOSOUND=${WOW_NOSOUND:-}"
+        # benilla reads the variable's presence, not its value: an empty line would mute too.
+        [ -n "${WOW_NOSOUND:-}" ] && echo "WOW_NOSOUND=$WOW_NOSOUND"
         # An emulator's goldfish Vulkan encoder hangs under concurrent calls (benilla_world::boot).
         if adb_ shell ls /system/lib64/libvulkan_enc.so >/dev/null 2>&1; then
             echo "WOW_GPU_SERIAL=1"
