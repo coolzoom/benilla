@@ -80,10 +80,11 @@ impl RenderAsset for GpuImage {
             && image.texture_descriptor.dimension == TextureDimension::D2
             && (layers == 1 || layers % 6 == 0)
             && image.data_order == wgpu::util::TextureDataOrder::LayerMajor
-            && image
-                .texture_view_descriptor
-                .as_ref()
-                .is_some_and(|v| v.dimension == Some(TextureViewDimension::D2Array))
+            && match image.texture_view_descriptor.as_ref().and_then(|v| v.dimension) {
+                Some(dimension) => dimension == TextureViewDimension::D2Array,
+                // wgpu's default view of a layered 2D texture.
+                None => layers > 1,
+            }
         {
             image.texture_descriptor.size.depth_or_array_layers = layers + 1;
             if let Some(data) = image.data.as_mut() {
