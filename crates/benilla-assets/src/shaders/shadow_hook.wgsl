@@ -286,8 +286,14 @@ fn torch_map_depth(
     uv: vec2<f32>,
     dims: vec2<f32>,
 ) -> f32 {
+#ifdef NO_DEPTH_TEXTURE_LOAD
+    // GLSL has no raw depth read: a depth below every reference is never a blocker, so the search
+    // keeps the contact radius and the PCF taps are the fixed box from before PCSS.
+    return -1.0;
+#else
     let c = clamp(vec2<i32>(floor(uv * dims)), vec2<i32>(0, 0), vec2<i32>(dims) - vec2<i32>(1, 1));
     return textureLoad(depth_tex, c, layer, 0);
+#endif
 }
 
 // MONKEY (torch shadows Phase 1): the depth-map projector. Because `shadow_hook` is imported by

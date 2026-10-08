@@ -101,6 +101,14 @@ pub mod testing {
     }
 }
 
+/// Whether wgpu runs on its GLES backend (`WGPU_BACKEND=gl`, how an Android emulator is driven).
+/// naga cannot write a WGSL `textureLoad` from a depth texture as GLSL, so a pass that reads the
+/// scene depth that way fails pipeline creation there and must not be scheduled.
+pub fn gl_backend() -> bool {
+    static GL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *GL.get_or_init(|| std::env::var("WGPU_BACKEND").is_ok_and(|b| b.eq_ignore_ascii_case("gl")))
+}
+
 pub mod art_scope;
 pub mod assets;
 pub mod bgwin;

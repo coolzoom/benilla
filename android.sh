@@ -364,11 +364,14 @@ write_device_env() {
         # benilla reads the variable's presence, not its value: an empty line would mute too.
         [ -n "${WOW_NOSOUND:-}" ] && echo "WOW_NOSOUND=$WOW_NOSOUND"
         # An emulator's goldfish Vulkan encoder hangs under concurrent calls (benilla_world::boot).
+        # Its Vulkan stalls the first frames as well, so an emulator defaults to GLES.
+        local backend="${WGPU_BACKEND:-}"
         if adb_ shell ls /system/lib64/libvulkan_enc.so >/dev/null 2>&1; then
             echo "WOW_GPU_SERIAL=1"
+            backend="${backend:-gl}"
         fi
-        # wgpu's backend override (`vulkan`, `gl`), passed through when set here.
-        [ -n "${WGPU_BACKEND:-}" ] && echo "WGPU_BACKEND=$WGPU_BACKEND"
+        # wgpu's backend override (`vulkan`, `gl`).
+        if [ -n "$backend" ]; then echo "WGPU_BACKEND=$backend"; fi
     } >"$f"
     chmod 600 "$f"
 }
@@ -460,7 +463,7 @@ run_app() {
     say "logcat（Ctrl-C 结束跟踪，应用继续运行）"
     local pid=""
     for _ in $(seq 1 20); do
-        pid="$(adb_ shell pidof "$PKG" 2>/dev/null | tr -d '\r')"
+        pid="$(adb_ shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"
         [ -n "$pid" ] && break
         sleep 0.5
     done

@@ -121,7 +121,7 @@ impl Plugin for VolumetricFogPlugin {
         // depends on this cvar.
         .add_systems(Last, update_fog.after(ShadowSet::Lanes));
         // Keep headless policy tests independent of the renderer.
-        if !app.is_plugin_added::<AssetPlugin>() {
+        if !app.is_plugin_added::<AssetPlugin>() || benilla_world::gl_backend() {
             return;
         }
         let shader = app

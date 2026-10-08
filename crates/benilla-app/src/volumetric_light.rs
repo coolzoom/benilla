@@ -157,7 +157,7 @@ impl Plugin for VolumetricLightPlugin {
             .insert_resource(VolLightTune::from_env())
             .add_plugins(ExtractComponentPlugin::<VolLightView>::default())
             .add_systems(Last, update_views.after(ShadowSet::Lanes));
-        if !app.is_plugin_added::<AssetPlugin>() {
+        if !app.is_plugin_added::<AssetPlugin>() || benilla_world::gl_backend() {
             return;
         }
         let shader = app

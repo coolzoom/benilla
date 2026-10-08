@@ -109,7 +109,7 @@ impl Plugin for AmbientOcclusionPlugin {
             .add_plugins(ExtractComponentPlugin::<AoView>::default())
             .add_systems(Last, update_ao);
         // Keep headless policy tests independent of the renderer.
-        if !app.is_plugin_added::<AssetPlugin>() {
+        if !app.is_plugin_added::<AssetPlugin>() || benilla_world::gl_backend() {
             return;
         }
         // MONKEY (integration): the crate's shader convention — embedded by `shaders::plugin`.

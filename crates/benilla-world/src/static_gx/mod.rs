@@ -89,10 +89,7 @@ const WORD_FOLIAGE_WIND: u32 = 1 << 29;
 /// black.
 pub fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        let gl = std::env::var("WGPU_BACKEND").is_ok_and(|b| b.eq_ignore_ascii_case("gl"));
-        std::env::var("WOW_STATIC_GX").as_deref() != Ok("0") && !gl
-    })
+    *ON.get_or_init(|| std::env::var("WOW_STATIC_GX").as_deref() != Ok("0") && !crate::gl_backend())
 }
 
 /// `WOW_WMO_BIAS=0`: the authored batch-order nudge bakes as zero, as in `model_material`.

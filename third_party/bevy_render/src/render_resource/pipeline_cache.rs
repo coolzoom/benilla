@@ -283,6 +283,10 @@ impl PipelineCache {
         if cfg!(target_abi = "sim") || crate::renderer::point_shadow_cube_only(&render_adapter) {
             global_shader_defs.push("NO_CUBE_ARRAY_TEXTURES_SUPPORT".into());
         }
+        // naga's GLSL writer has no `textureLoad` from a depth texture.
+        if render_adapter.get_info().backend == wgpu::Backend::Gl {
+            global_shader_defs.push("NO_DEPTH_TEXTURE_LOAD".into());
+        }
 
         global_shader_defs.push(ShaderDefVal::UInt(
             String::from("AVAILABLE_STORAGE_BUFFER_BINDINGS"),

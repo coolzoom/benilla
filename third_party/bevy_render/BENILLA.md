@@ -39,6 +39,13 @@ a level needs `GL_EXT_texture_shadow_lod`, which MuMu's GLES lacks. There `Pipel
 `NO_CUBE_ARRAY_TEXTURES_SUPPORT`, as it does for the iOS simulator; the `bevy_pbr` fork binds and
 views the point-shadow map to match (`third_party/bevy_pbr/BENILLA.md`).
 
+## Patch 4 — `NO_DEPTH_TEXTURE_LOAD` on GL, `pipeline_cache.rs`
+
+naga's GLSL writer rejects a WGSL `textureLoad` from a depth texture, which fails the pipeline and,
+with wgpu errors fatal, the app. On the GL backend `PipelineCache::new` adds the global shader def
+`NO_DEPTH_TEXTURE_LOAD`, so a benilla shader can take another path there (`shadow_hook.wgsl`'s
+torch blocker search).
+
 ## How to check
 
     diff -ru ~/.cargo/registry/src/index.crates.io-*/bevy_render-0.18.1/src third_party/bevy_render/src

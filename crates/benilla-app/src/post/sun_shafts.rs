@@ -50,7 +50,7 @@ impl Plugin for SunShaftsPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(ExtractComponentPlugin::<ShaftView>::default())
             .add_systems(Last, update_views);
-        if !app.is_plugin_added::<AssetPlugin>() {
+        if !app.is_plugin_added::<AssetPlugin>() || benilla_world::gl_backend() {
             return;
         }
         let shader = app
