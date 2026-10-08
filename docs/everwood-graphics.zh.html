@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Everwood 画质增强功能说明（开关与预设）</title>
+<style>
+  :root { --fg:#1d1f23; --muted:#5b6170; --line:#dde1e8; --accent:#8a5a14; --bg:#fbfaf7; --code:#f1efe9; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:15px/1.7 -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }
+  main { max-width:960px; margin:0 auto; padding:32px 24px 64px; }
+  h1 { font-size:26px; margin:0 0 4px; }
+  h2 { font-size:20px; margin:36px 0 12px; padding-bottom:6px; border-bottom:2px solid var(--line); }
+  h3 { font-size:16px; margin:24px 0 8px; }
+  p.lead { color:var(--muted); margin-top:0; }
+  code { background:var(--code); padding:1px 5px; border-radius:4px; font:13px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+  pre { background:var(--code); padding:12px 14px; border-radius:6px; overflow-x:auto; }
+  pre code { background:none; padding:0; }
+  table { width:100%; border-collapse:collapse; margin:8px 0 16px; font-size:14px; }
+  th, td { border:1px solid var(--line); padding:6px 9px; text-align:left; vertical-align:top; }
+  th { background:#f3f1ec; }
+  td.c, th.c { text-align:center; }
+  .box { border-left:4px solid var(--accent); background:#fff; padding:10px 14px; margin:14px 0; border-radius:0 6px 6px 0; }
+  .warn { border-left-color:#b3361b; }
+  .tag { display:inline-block; font-size:12px; padding:0 6px; border-radius:3px; background:#e9e4d8; color:#5a4a2a; }
+  footer { margin-top:48px; color:var(--muted); font-size:13px; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Everwood 画质增强功能说明</h1>
+<p class="lead">从 <code>pkuzic/benilla-everwood_graphics</code>（Everwood graphics 分支）合并进来的动态光影与画面增强系统：功能概览、总开关、预设档位与单项开关。</p>
+
+<div class="box">
+  <b>一句话：</b>把「图形预设」（<code>graphicsQuality</code>）设为 <b>Classic</b> 就是关闭全部增强，回到原版 1.12.1 客户端的画面；设为 <b>Low / Medium / High / Ultra</b> 即开启（档位越高效果越多）。新玩家默认是 <b>High</b>。
+</div>
+
+<h2>1. 这是什么</h2>
+<p>benilla 本身是对 1.12.1 原版客户端的忠实复刻。Everwood 分支在其上加了一整套<b>原版没有</b>的画面增强：实时日月阴影、室内动态光照、火把阴影、体积雾与体积光、增强水面、天空与雾效、雨天湿润地表、植被随风摆动、环境光遮蔽等。全部效果都只用 1.12 安装目录里已有的数据推算出来，不需要额外资源。</p>
+<p>因为这些都偏离了原版观感，分支作者为每一项都配了独立的开关（cvar），并提供一个总的预设阶梯，可以一键关闭。</p>
+
+<h2>2. 总开关：图形预设</h2>
+
+<h3>2.1 三种切换方式（效果完全相同）</h3>
+<table>
+  <tr><th>方式</th><th>关闭（原版画面）</th><th>开启</th></tr>
+  <tr><td>游戏内菜单</td><td>选项 → 高级图形（Advanced Graphics）→ 图形预设（Graphics Preset）选 <b>Classic</b></td><td>同一处选 Low / Medium / High / Ultra</td></tr>
+  <tr><td>控制台命令</td><td><code>/console graphicsQuality Classic</code></td><td><code>/console graphicsQuality High</code></td></tr>
+  <tr><td>配置文件</td><td><code>benilla-config/config.toml</code> 中写 <code>graphicsQuality = "Classic"</code></td><td>写 <code>graphicsQuality = "High"</code>（或其他档）</td></tr>
+</table>
+<p>选择会保存到 <code>config.toml</code>，重启后依然有效。</p>
+<p>若之后单独改动了某一项开关，预设会显示为 <b>Custom</b>（自定义），表示当前组合不对应任何一档。</p>
+
+<h3>2.2 各档位具体设置</h3>
+<p>下表来自代码里的 <code>GRAPHICS_PRESETS</code>（<code>crates/benilla-app/src/cvars/mod.rs</code>），是唯一的权威定义。</p>
+<table>
+  <tr><th>开关（cvar）</th><th>含义</th><th class="c">Classic</th><th class="c">Low</th><th class="c">Medium</th><th class="c">High</th><th class="c">Ultra</th></tr>
+  <tr><td><code>lightingQuality</code></td><td>光影子预设（见第 3 节）</td><td class="c">Off</td><td class="c">Low</td><td class="c">Medium</td><td class="c">High</td><td class="c">Ultra</td></tr>
+  <tr><td><code>farclip</code></td><td>视距（码）</td><td class="c">350</td><td class="c">350</td><td class="c">477</td><td class="c">777</td><td class="c">1497</td></tr>
+  <tr><td><code>skyQuality</code></td><td>天空质量 0 原版 / 1 增强 / 2 高</td><td class="c">0</td><td class="c">1</td><td class="c">1</td><td class="c">2</td><td class="c">2</td></tr>
+  <tr><td><code>skyDither</code></td><td>天空抖动（消除色带）</td><td class="c">0</td><td class="c">1</td><td class="c">1</td><td class="c">1</td><td class="c">1</td></tr>
+  <tr><td><code>fogModel</code></td><td>现代雾效</td><td class="c">0</td><td class="c">1</td><td class="c">1</td><td class="c">1</td><td class="c">1</td></tr>
+  <tr><td><code>rainSurfaces</code></td><td>雨天湿润地表</td><td class="c">0</td><td class="c">1</td><td class="c">1</td><td class="c">1</td><td class="c">1</td></tr>
+  <tr><td><code>torchTerrainShadows</code></td><td>地形遮挡火把光</td><td class="c">0</td><td class="c">0</td><td class="c">0</td><td class="c">1</td><td class="c">1</td></tr>
+  <tr><td><code>daylightWindowSplit</code></td><td>城市窗户日光</td><td class="c">0</td><td class="c">1</td><td class="c">1</td><td class="c">1</td><td class="c">1</td></tr>
+  <tr><td><code>ambientOcclusion</code></td><td>环境光遮蔽 0/1/2</td><td class="c">0</td><td class="c">0</td><td class="c">1</td><td class="c">2</td><td class="c">2</td></tr>
+  <tr><td><code>zoneSkyboxes</code></td><td>区域天空盒</td><td class="c">0</td><td class="c">0</td><td class="c">1</td><td class="c">1</td><td class="c">1</td></tr>
+  <tr><td><code>lampFog</code></td><td>灯光雾晕 0/1/2</td><td class="c">0</td><td class="c">0</td><td class="c">1</td><td class="c">2</td><td class="c">2</td></tr>
+  <tr><td><code>volumetricLight</code></td><td>体积光（光柱）0/1/2</td><td class="c">0</td><td class="c">0</td><td class="c">1</td><td class="c">2</td><td class="c">2</td></tr>
+  <tr><td><code>moonLight</code></td><td>月光</td><td class="c">0</td><td class="c">1</td><td class="c">1</td><td class="c">1</td><td class="c">1</td></tr>
+</table>
+<p><b>选档建议：</b></p>
+<ul>
+  <li>Low / Medium 只开几乎不耗性能的项（天空、抖动、现代雾、湿润地表、月光），耗 GPU 的阴影与后处理留给 High。</li>
+  <li>Ultra 是 High 再把每项拉满，也是唯一超过原版 777 码视距上限的档。</li>
+</ul>
+
+<h2>3. 光影子预设：<code>lightingQuality</code></h2>
+<p>位于高级图形页，档位为 Off / Low / Medium / High / Ultra，同样可以单独设置。它管理的成员由代码里的 <code>LIGHTING_PRESETS</code> 定义。</p>
+<p><b>Off</b> 会把下列全部关掉：</p>
+<ul>
+  <li>角色和世界的实时阴影：<code>characterShadows</code>、<code>worldShadows</code></li>
+  <li>室内光照与火把阴影：<code>interiorLight</code>、<code>interiorShadows</code>、<code>exteriorShadows</code></li>
+  <li>各类附加光源：法术光 <code>spellLightGain</code>、火光 <code>fireLightGain</code>、火焰闪烁 <code>fireFlicker</code>、熔岩光 <code>lavaLightGain</code></li>
+  <li>增强水面：<code>waterQuality</code></li>
+  <li>体积雾：<code>volumetricFog</code></li>
+  <li>后处理：泛光 <code>bloom</code>、太阳光束 <code>sunShafts</code>、调色 <code>colorGrading</code></li>
+  <li>月影：<code>moonShadowStrength</code></li>
+  <li>植被风：<code>foliageWind</code></li>
+  <li>夜间与室内亮度恢复为 1.0：<code>nightGain</code>、<code>interiorGain</code></li>
+</ul>
+<p>选 Classic 图形预设时，这一项会自动变为 Off。</p>
+
+<h2>4. 各项功能与单独开关</h2>
+<p>不想全关、只想关掉某一项时，可在高级图形页单独调整，也可用 <code>/console 开关名 值</code>。部分功能还支持启动时用环境变量强制（仅当次会话有效，不写入配置）。</p>
+<table>
+  <tr><th>功能</th><th>效果</th><th>开关</th></tr>
+  <tr><td>角色阳光阴影</td><td>单位投射真实轮廓阴影，代替原版椭圆阴影</td><td><code>characterShadows</code></td></tr>
+  <tr><td>世界阳光阴影</td><td>树木、建筑、植被投影</td><td><code>worldShadows</code></td></tr>
+  <tr><td>室内动态光照</td><td>WMO 房间由自身灯具逐像素照亮，按房间隔离不穿墙</td><td><code>interiorLight</code>、<code>interiorRoomGate</code></td></tr>
+  <tr><td>合成光源</td><td>火把、火盆、灯笼、营火发出带闪烁的火色光</td><td><code>fireLightGain</code>、<code>fireFlicker</code></td></tr>
+  <tr><td>火把阴影</td><td>点光源立方体阴影，带接触硬化半影</td><td><code>interiorShadows</code>、<code>exteriorShadows</code>、<code>torchShadowStrength</code>、<code>interiorShadowSoft</code></td></tr>
+  <tr><td>门窗日光</td><td>日光从门、窗进入房间，相邻房间互相渗光</td><td><code>interiorDaylight</code>；环境变量 <code>WOW_DAYLIGHT</code>、<code>WOW_BLEED</code></td></tr>
+  <tr><td>地形遮挡火把</td><td>山坡、河岸挡住室外火光</td><td><code>torchTerrainShadows</code>；<code>WOW_TORCH_TERRAIN=0|1</code></td></tr>
+  <tr><td>法术与烟花光</td><td>火、神圣、邪能效果照亮周围</td><td><code>spellLightGain</code>；<code>WOW_SPELL_LIGHT=0</code></td></tr>
+  <tr><td>月影 / 月光</td><td>夜间阴影朝向月亮；月亮作为冷色弱方向光</td><td><code>moonShadowStrength</code>、<code>moonLight</code>（0 = 原版夜晚）</td></tr>
+  <tr><td>体积雾</td><td>近景薄雾、晨雾、日光穿隙</td><td><code>volumetricFog</code>；<code>WOW_VOLFOG=0|1|2</code></td></tr>
+  <tr><td>体积光</td><td>阴影驱动的日月光柱</td><td><code>volumetricLight</code>、<code>volumetricLightStrength</code>；<code>WOW_VOLLIGHT=0|1|2</code></td></tr>
+  <tr><td>天空抖动</td><td>消除天空与雾的色带</td><td><code>skyDither</code>；<code>WOW_DITHER=1</code></td></tr>
+  <tr><td>HDR 自发光与泛光</td><td>窗户、魔法、熔岩超白发光与光晕</td><td><code>bloom</code>（Off 即原版画面）</td></tr>
+  <tr><td>天空质量</td><td>平滑天空渐变、太阳辉光、星空银河、立体云</td><td><code>skyQuality</code>；<code>WOW_SKY_QUALITY</code></td></tr>
+  <tr><td>现代雾</td><td>径向指数雾、太阳方向光晕</td><td><code>fogModel</code>；<code>WOW_FOGMODEL=0|1</code></td></tr>
+  <tr><td>雨天湿润地表</td><td>雨中地面变暗、积水、反光，屋檐下保持干燥</td><td><code>rainSurfaces</code>；<code>WOW_RAIN_SURFACES</code></td></tr>
+  <tr><td>植被风</td><td>草与树随阵风摆动，角色经过时草会分开</td><td><code>foliageWind</code>（0 关 / 1 草 / 2 草+树）、<code>foliageWindStrength</code></td></tr>
+  <tr><td>环境光遮蔽</td><td>物体底部、墙角、脚下的柔和接触阴影</td><td><code>ambientOcclusion</code>；<code>WOW_AO=0|1|2</code></td></tr>
+  <tr><td>灯光雾晕</td><td>雾中可见的灯光光晕</td><td><code>lampFog</code>；<code>WOW_LAMPFOG=0|1|2</code></td></tr>
+  <tr><td>城市窗户日光</td><td>城市建筑窗户的日光处理</td><td><code>daylightWindowSplit</code></td></tr>
+  <tr><td>区域天空盒</td><td>按区域显示手绘天空，带过渡</td><td><code>zoneSkyboxes</code>；<code>WOW_ZONE_SKYBOXES=0|1</code></td></tr>
+  <tr><td>增强水面</td><td>波浪、反射等（0 原版 / 1 增强 / 2 高）</td><td><code>waterQuality</code>；<code>WOW_WATER=0|1|2</code></td></tr>
+  <tr><td>夜间与室内亮度</td><td>整体亮度系数</td><td><code>nightGain</code>、<code>interiorGain</code></td></tr>
+</table>
+<p>更完整的技术细节见仓库根目录的 <code>LIGHTING.md</code> 与 <code>WATER.md</code>（英文）。</p>
+
+<h2>5. 注意事项</h2>
+<div class="box warn">
+  <p><b>Classic 不等于完全撤销合并。</b>合并中有少量 <span class="tag">MONKEY (gfx)</span> 提交属于修复而非效果，例如：</p>
+  <ul>
+    <li>风中岩石与地面杂物保持不动</li>
+    <li>修复半透明眼睛发光材质</li>
+  </ul>
+  <p>它们没有开关，Classic 下依然生效。若需要彻底去掉，只能在代码层回退相应提交。</p>
+</div>
+<div class="box">
+  <p><b>安卓 / MuMu 模拟器：</b>模拟器走 GLES 后端时，静态世界通道（<code>static_gx</code>）会自动关闭，以修复树木变黑的问题。因此分支在该通道着色器里的部分增强在模拟器上本就不会出现。</p>
+  <p>在性能较弱的设备上，建议选 Classic 或 Low。</p>
+</div>
+<div class="box">
+  <p><b>环境变量的作用：</b>环境变量只覆盖当次会话，不会写入 <code>config.toml</code>。</p>
+  <p>在安卓上，可写进设备的 <code>files/benilla.env</code>（每行一个 <code>KEY=VALUE</code>），由启动器在启动时读取。</p>
+</div>
+
+<footer>本文依据仓库中的 <code>LIGHTING.md</code>、<code>WATER.md</code> 与 <code>crates/benilla-app/src/cvars/mod.rs</code>（<code>GRAPHICS_PRESETS</code>、<code>LIGHTING_PRESETS</code>）整理；两者不一致时以代码为准。</footer>
+</main>
+</body>
+</html>
