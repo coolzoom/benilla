@@ -34,7 +34,8 @@ impl Plugin for GluePlugin {
             .init_resource::<GlueArt>()
             .add_systems(
                 Startup,
-                crate::glue_strings::load_glue_strings.after(benilla_assets::AssetSet::Open),
+                (crate::glue_strings::load_glue_strings, register_locale_fonts)
+                    .after(benilla_assets::AssetSet::Open),
             )
             .init_resource::<GlueClicks>()
             .init_resource::<dialog::GlueDialog>()
@@ -54,6 +55,27 @@ impl Plugin for GluePlugin {
                 Update,
                 (art_swaps, glue_button_visuals, glue_hilights, sync_outlines).in_set(GlueVisuals),
             );
+    }
+}
+
+/// The glue screens draw with Bevy's text, whose font database holds only the faces a `TextFont`
+/// names, Friz and Arial Narrow: a CJK caption shapes as their `.notdef` box. The client's CJK
+/// faces ([`crate::ui_text::LOCALE_FONTS`]) go into it before any glue text is shaped, so the
+/// fallback finds them. Absent faces (every other locale) are skipped.
+fn register_locale_fonts(
+    world_assets: Option<Res<benilla_assets::WorldAssets>>,
+    font_system: Option<ResMut<bevy::text::CosmicFontSystem>>,
+) {
+    use benilla_assets::LockRecover;
+    let (Some(world_assets), Some(mut font_system)) = (world_assets, font_system) else {
+        return;
+    };
+    for path in crate::ui_text::LOCALE_FONTS {
+        let Ok(bytes) = world_assets.chain.lock_recover().read(path) else {
+            continue;
+        };
+        let source = cosmic_text::fontdb::Source::Binary(std::sync::Arc::new(bytes));
+        font_system.0.db_mut().load_font_source(source);
     }
 }
 

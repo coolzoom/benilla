@@ -33,6 +33,7 @@ use cosmic_text::{
 use benilla_assets::{LockRecover, WorldAssets};
 
 use faces::{hhea_ascent_ratio, register_font, CLIENT_FONTS};
+pub(crate) use faces::LOCALE_FONTS;
 pub(crate) use gpu::UiTextPlugin;
 
 use super::outline::outlined_cell;
@@ -156,13 +157,19 @@ impl TextEngine {
         let mut font_system = client_font_system();
         let mut faces: Vec<Face> = Vec::new();
         let mut path_to_face = HashMap::new();
-        for &path in CLIENT_FONTS {
+        for (&path, required) in CLIENT_FONTS
+            .iter()
+            .map(|p| (p, true))
+            .chain(LOCALE_FONTS.iter().map(|p| (p, false)))
+        {
             let bytes = {
                 let chain = world_assets.chain.lock_recover();
                 match chain.read(path) {
                     Ok(b) => b,
                     Err(e) => {
-                        warn!("ui_text: failed to read {path} from the patch chain: {e:#}");
+                        if required {
+                            warn!("ui_text: failed to read {path} from the patch chain: {e:#}");
+                        }
                         continue;
                     }
                 }
@@ -371,16 +378,25 @@ impl TextEngine {
         };
         let (face_id, family, weight, style, stretch) =
             (f.id, f.family.clone(), f.weight, f.style, f.stretch);
-        let attrs = Attrs::new()
-            .family(Family::Name(&family))
-            .weight(weight)
-            .style(style)
-            .stretch(stretch);
         let px = f32::from(ppem);
         let mut glyphs: Vec<GlyphRef> = Vec::new();
         let mut floor_sum = 0.0f32;
         let mut shaped_by = None;
-        {
+        // `cosmic-text` falls back only to faces of the requested stretch, and every CJK face is
+        // Normal: a character Arial Narrow (Condensed) lacks shapes as its `.notdef` box. Such a
+        // character is shaped again at Normal stretch, where the fallback reaches those faces.
+        for (pass, try_stretch) in [stretch, fontdb::Stretch::Normal].into_iter().enumerate() {
+            if pass == 1 && (try_stretch == stretch || !glyphs.iter().any(|g| g.glyph_id == 0)) {
+                break;
+            }
+            glyphs.clear();
+            floor_sum = 0.0;
+            shaped_by = None;
+            let attrs = Attrs::new()
+                .family(Family::Name(&family))
+                .weight(weight)
+                .style(style)
+                .stretch(try_stretch);
             let mut buf = Buffer::new(&mut self.font_system, Metrics::new(px, px));
             buf.set_wrap(&mut self.font_system, Wrap::None);
             let mut one = [0u8; 4];
@@ -439,6 +455,13 @@ impl TextEngine {
                 },
             );
             return;
+        }
+        if glyphs.iter().any(|g| g.glyph_id == 0) && self.complained.insert(ch) {
+            let want = self.faces.get(face).map_or("?", |f| f.path.as_str());
+            warn!(
+                "ui_text: {ch:?} shapes as .notdef in '{want}' (family {family:?}, stretch \
+                 {stretch:?}, shaped by {shaped_by:?}) — it draws as a box"
+            );
         }
         self.stats.chars_shaped += 1;
         if let Some(radius) = radius {

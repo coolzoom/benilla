@@ -11,6 +11,18 @@ pub(super) const CLIENT_FONTS: &[&str] = &[
     "Fonts\\SKURRI.TTF",
 ];
 
+/// The zhCN client's own CJK faces, registered with the four when the chain carries them. A string
+/// in Friz shapes through `cosmic-text`'s first face able to draw a character, and a face first
+/// named mid-session by `SetFont` comes too late for the glue screens: the characters drawn before
+/// it are cached as Friz's `.notdef` box. Absent on other locales, and then silently skipped. The
+/// glue screens' Bevy text takes the same list (`glue::register_locale_fonts`).
+pub(crate) const LOCALE_FONTS: &[&str] = &[
+    "Fonts\\FZXHLJW.TTF",
+    "Fonts\\FZXHJW.TTF",
+    "Fonts\\FZLBJW.TTF",
+    "Fonts\\FZBWJW.TTF",
+];
+
 /// The face's ascender as a fraction of the em, `hhea.asc / (hhea.asc + |hhea.desc|)`, off the raw
 /// sfnt bytes. The reference puts the baseline at `cellTop + round(em · ratio)` (`[CGxFont+0x17c]`,
 /// set at `0x5ca030`, reaching the placement kernel `0x5d1360` through `0x5ca160` and `0x5d1120`);
