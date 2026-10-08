@@ -201,9 +201,13 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
             uv_mixed.y = clamp(uv_mixed.y, inset.y, 1.0 - inset.y);
         }
         // The render-scale LOD bias: bevy's material path applies it for free, this lane by hand.
+        let c_mixed = textureSampleBias(tex_array, samp_repeat, uv_mixed, layer, view.mip_bias);
+#ifdef GX_ONE_SAMPLER
+        // GL pairs a texture with one sampler: every batch takes the half-texel inset clamp.
+        base = c_mixed;
+#else
         let c_repeat = textureSampleBias(tex_array, samp_repeat, in.uv, layer, view.mip_bias);
         let c_clamp = textureSampleBias(tex_array, samp_clamp, in.uv, layer, view.mip_bias);
-        let c_mixed = textureSampleBias(tex_array, samp_repeat, uv_mixed, layer, view.mip_bias);
         if (wrap_x && wrap_y) {
             base = c_repeat;
         } else if (!wrap_x && !wrap_y) {
@@ -211,6 +215,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         } else {
             base = c_mixed;
         }
+#endif
     }
 #ifdef GX_CUTOUT
     if (base.a < VANILLA_ALPHA_KEY) {

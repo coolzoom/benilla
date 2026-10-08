@@ -286,6 +286,7 @@ fn prepare_static_gx(
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
+    render_adapter: Res<bevy::render::renderer::RenderAdapter>,
     asset_server: Res<AssetServer>,
     images: Res<RenderAssets<GpuImage>>,
     views: Query<GxViewKey>,
@@ -304,11 +305,17 @@ fn prepare_static_gx(
         let shader: Handle<Shader> =
             asset_server.load("embedded://benilla_world/shaders/static_gx.wgsl");
         pipes.pipelines.clear();
+        // naga's GLSL backend binds a texture to one sampler and rejects a second.
+        let one_sampler = bevy::render::settings::Backends::from(render_adapter.get_info().backend)
+            == bevy::render::settings::Backends::GL;
         for cutout in [false, true] {
             for two_sided in [false, true] {
                 let mut defs = vec![];
                 if cutout {
                     defs.push(ShaderDefVal::from("GX_CUTOUT"));
+                }
+                if one_sampler {
+                    defs.push(ShaderDefVal::from("GX_ONE_SAMPLER"));
                 }
                 let id = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
                     label: Some(

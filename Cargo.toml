@@ -57,6 +57,9 @@ kira = { path = "third_party/kira" }
 # (`third_party/bevy_render/BENILLA.md`, `third_party/bevy_pbr/BENILLA.md`).
 bevy_render = { path = "third_party/bevy_render" }
 bevy_pbr = { path = "third_party/bevy_pbr" }
+# wgpu-hal 27.0.4, its GLES slot tables widened to 32 so a layout's vertex-only textures cannot
+# overrun them (`third_party/wgpu-hal/BENILLA.md`).
+wgpu-hal = { path = "third_party/wgpu-hal" }
 
 # Dependencies at opt-level 3 in dev: at opt-level 0, avian/parry collision drops a run to <1 fps.
 [profile.dev.package."*"]
