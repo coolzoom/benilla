@@ -69,6 +69,155 @@ pub struct ExtractedWindow {
     /// On Wayland, windows must present at least once before they are shown.
     /// See <https://wayland.app/protocols/xdg-shell#xdg_surface>
     pub needs_initial_present: bool,
+    /// benilla: the sRGB stage of a surface that cannot be viewed as sRGB.
+    srgb_encode: Option<WgpuWrapper<SrgbEncode>>,
+}
+
+/// benilla: a non-sRGB surface the adapter cannot view as sRGB (`SURFACE_VIEW_FORMATS`, missing on
+/// an emulated GLES such as MuMu). The frame renders into an sRGB stage texture of the same size,
+/// which a fullscreen pass encodes into the surface at present; GLES surfaces allow no copy into
+/// them (third_party/bevy_render/BENILLA.md).
+struct SrgbEncode {
+    format: TextureFormat,
+    layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::RenderPipeline,
+    stage: Option<(wgpu::Texture, wgpu::BindGroup)>,
+    frame_view: Option<wgpu::TextureView>,
+}
+
+const SRGB_ENCODE_WGSL: &str = r"
+@group(0) @binding(0) var stage: texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let uv = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4<f32>(uv * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0);
+}
+
+@fragment
+fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let c = textureLoad(stage, vec2<i32>(position.xy), 0);
+    let low = c.rgb * 12.92;
+    let high = 1.055 * pow(c.rgb, vec3<f32>(1.0 / 2.4)) - 0.055;
+    return vec4<f32>(select(high, low, c.rgb <= vec3<f32>(0.0031308)), c.a);
+}
+";
+
+impl SrgbEncode {
+    fn new(device: &wgpu::Device, format: TextureFormat) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("benilla_srgb_encode_layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("benilla_srgb_encode"),
+            source: wgpu::ShaderSource::Wgsl(SRGB_ENCODE_WGSL.into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("benilla_srgb_encode"),
+            bind_group_layouts: &[&layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("benilla_srgb_encode"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                compilation_options: default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                compilation_options: default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: default(),
+            depth_stencil: None,
+            multisample: default(),
+            multiview: None,
+            cache: None,
+        });
+        Self {
+            format,
+            layout,
+            pipeline,
+            stage: None,
+            frame_view: None,
+        }
+    }
+
+    /// The stage texture for a frame of `size`, (re)created on a resize.
+    fn stage(&mut self, device: &wgpu::Device, size: wgpu::Extent3d) -> &wgpu::Texture {
+        if self.stage.as_ref().is_none_or(|(t, _)| t.size() != size) {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("benilla_srgb_stage"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.format.add_srgb_suffix(),
+                usage: TextureUsages::RENDER_ATTACHMENT
+                    | TextureUsages::TEXTURE_BINDING
+                    | TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("benilla_srgb_stage"),
+                layout: &self.layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture.create_view(&default())),
+                }],
+            });
+            self.stage = Some((texture, bind_group));
+        }
+        &self.stage.as_ref().unwrap().0
+    }
+
+    /// Encode the stage into the frame it was rendered for.
+    fn encode(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let (Some(frame_view), Some((_, bind_group))) = (self.frame_view.take(), &self.stage)
+        else {
+            return;
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("benilla_srgb_encode"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("benilla_srgb_encode"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &frame_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..default()
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        queue.submit([encoder.finish()]);
+    }
 }
 
 impl ExtractedWindow {
@@ -76,11 +225,27 @@ impl ExtractedWindow {
         &mut self,
         frame: wgpu::SurfaceTexture,
         view_format: Option<TextureFormat>,
+        render_device: &RenderDevice,
     ) {
         // benilla: the view format the surface was configured with, not an sRGB view of every
-        // frame, which needs `SURFACE_VIEW_FORMATS` (third_party/bevy_render/BENILLA.md).
-        self.swap_chain_texture_view_format =
-            Some(view_format.unwrap_or_else(|| frame.texture.format()));
+        // frame, which needs `SURFACE_VIEW_FORMATS`; without it, an sRGB stage the present encodes
+        // (third_party/bevy_render/BENILLA.md).
+        let format = frame.texture.format();
+        if view_format.is_none() && format.add_srgb_suffix() != format {
+            let device = render_device.wgpu_device();
+            if self.srgb_encode.as_ref().is_none_or(|e| e.format != format) {
+                self.srgb_encode = Some(WgpuWrapper::new(SrgbEncode::new(device, format)));
+            }
+            let encode = self.srgb_encode.as_mut().unwrap();
+            let stage = encode.stage(device, frame.texture.size());
+            self.swap_chain_texture_view = Some(TextureView::from(stage.create_view(&default())));
+            self.swap_chain_texture_view_format = Some(format.add_srgb_suffix());
+            encode.frame_view = Some(frame.texture.create_view(&default()));
+            self.swap_chain_texture = Some(SurfaceTexture::from(frame));
+            return;
+        }
+        self.srgb_encode = None;
+        self.swap_chain_texture_view_format = Some(view_format.unwrap_or(format));
         let texture_view_descriptor = TextureViewDescriptor {
             format: self.swap_chain_texture_view_format,
             ..default()
@@ -95,8 +260,11 @@ impl ExtractedWindow {
         self.swap_chain_texture_view.is_some() && self.swap_chain_texture.is_some()
     }
 
-    pub fn present(&mut self) {
+    pub fn present(&mut self, render_device: &RenderDevice, queue: &wgpu::Queue) {
         if let Some(surface_texture) = self.swap_chain_texture.take() {
+            if let Some(encode) = self.srgb_encode.as_mut() {
+                encode.encode(render_device.wgpu_device(), queue);
+            }
             // TODO(clean): winit docs recommends calling pre_present_notify before this.
             // though `present()` doesn't present the frame, it schedules it to be presented
             // by wgpu.
@@ -158,6 +326,7 @@ fn extract_windows(
             present_mode_changed: false,
             alpha_mode: window.composite_alpha_mode,
             needs_initial_present: true,
+            srgb_encode: None,
         });
 
         if extracted_window.swap_chain_texture.is_none() {
@@ -285,7 +454,11 @@ pub fn prepare_windows(
         let surface = &surface_data.surface;
         match surface.get_current_texture() {
             Ok(frame) => {
-                window.set_swapchain_texture(frame, surface_data.texture_view_format);
+                window.set_swapchain_texture(
+                    frame,
+                    surface_data.texture_view_format,
+                    &render_device,
+                );
             }
             Err(wgpu::SurfaceError::Outdated) => {
                 render_device.configure_surface(surface, &surface_data.configuration);
@@ -298,7 +471,11 @@ pub fn prepare_windows(
                         continue;
                     }
                 };
-                window.set_swapchain_texture(frame, surface_data.texture_view_format);
+                window.set_swapchain_texture(
+                    frame,
+                    surface_data.texture_view_format,
+                    &render_device,
+                );
             }
             #[cfg(target_os = "linux")]
             Err(wgpu::SurfaceError::Timeout) if may_erroneously_timeout() => {

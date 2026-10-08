@@ -83,6 +83,8 @@ pub fn render_system(
         let _span = info_span!("present_frames").entered();
 
         world.resource_scope(|world, mut windows: Mut<ExtractedWindows>| {
+            let render_device = world.resource::<RenderDevice>().clone();
+            let render_queue = world.resource::<RenderQueue>().clone();
             let views = state.get(world);
             for window in windows.values_mut() {
                 let view_needs_present = views.iter().any(|(view_target, camera)| {
@@ -93,7 +95,7 @@ pub fn render_system(
                 });
 
                 if view_needs_present || window.needs_initial_present {
-                    window.present();
+                    window.present(&render_device, &render_queue);
                     window.needs_initial_present = false;
                 }
             }

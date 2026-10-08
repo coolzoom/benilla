@@ -18,12 +18,19 @@ fails validation and the app panics before its first frame.
 - `create_surfaces` asks for the sRGB view only where the adapter reports
   `SURFACE_VIEW_FORMATS`; otherwise the surface is configured with no extra view format.
 - `ExtractedWindow::set_swapchain_texture` takes the surface's configured view format and views
-  the frame in it, falling back to the frame's own format, instead of adding the sRGB suffix to
-  every frame.
+  the frame in it, instead of adding the sRGB suffix to every frame.
+
+## Patch 2 — the sRGB stage, `src/view/window/mod.rs` and `src/renderer/mod.rs`
+
+A non-sRGB surface with no sRGB view would take the frame linear and show it dark. Where the
+surface format has an sRGB twin and no view format was configured, `set_swapchain_texture` hands
+the render graph an sRGB stage texture of the frame's size (`SrgbEncode`) as the window's view,
+and `ExtractedWindow::present`, now given the device and queue by `render`, encodes the stage into
+the frame with one fullscreen pass before presenting. A pass, not a copy: GLES surfaces allow only
+`COLOR_TARGET`. Screenshots read the stage, as they read the window's view upstream.
 
 On every adapter with an sRGB surface, or with `SURFACE_VIEW_FORMATS`, the behaviour is
-upstream's byte for byte. Without either, the frame is written linear into a non-sRGB surface:
-the picture renders, darker than it should.
+upstream's byte for byte.
 
 ## How to check
 
