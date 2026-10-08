@@ -46,6 +46,15 @@ with wgpu errors fatal, the app. On the GL backend `PipelineCache::new` adds the
 `NO_DEPTH_TEXTURE_LOAD`, so a benilla shader can take another path there (`shadow_hook.wgsl`'s
 torch blocker search).
 
+## Patch 5 — one-layer `D2Array` images on GL, `src/texture/gpu_image.rs`
+
+wgpu-hal's GLES backend fixes a texture's target when it is created, guessing from the layer
+count: one layer is a `TEXTURE_2D`, six a cube, a multiple of six a cube array, and a `D2Array`
+view and a `sampler2DArray` over any of those sample nothing (the "view dimension heuristics" log
+error). Terrain layer, alpha and MCSH shadow arrays and liquid frame arrays hit these counts. On
+GL, `GpuImage::prepare_asset` gives such a layer-major image one more layer, a copy of its last, so
+the texture is a `TEXTURE_2D_ARRAY`. The `bevy_pbr` fork gives the sun's shadow map two layers.
+
 ## How to check
 
     diff -ru ~/.cargo/registry/src/index.crates.io-*/bevy_render-0.18.1/src third_party/bevy_render/src

@@ -1092,9 +1092,11 @@ pub fn prepare_lights(
                     .min(render_device.limits().max_texture_dimension_2d),
                 height: (directional_light_shadow_map.size as u32)
                     .min(render_device.limits().max_texture_dimension_2d),
+                // benilla: GL fixes a texture's target at creation from its layer count, so one
+                // layer would be a `TEXTURE_2D` the `D2Array` view and shader cannot sample.
                 depth_or_array_layers: (num_directional_cascades_enabled
                     + spot_light_shadow_maps_count)
-                    .max(1) as u32,
+                    .max(if cube_only { 2 } else { 1 }) as u32,
             },
             mip_level_count: 1,
             sample_count: 1,

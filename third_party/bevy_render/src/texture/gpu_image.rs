@@ -1,14 +1,14 @@
 use crate::{
     render_asset::{AssetExtractionError, PrepareAssetError, RenderAsset},
     render_resource::{DefaultImageSampler, Sampler, Texture, TextureView},
-    renderer::{RenderDevice, RenderQueue},
+    renderer::{RenderAdapter, RenderDevice, RenderQueue},
 };
 use bevy_asset::{AssetId, RenderAssetUsages};
 use bevy_ecs::system::{lifetimeless::SRes, SystemParamItem};
 use bevy_image::{Image, ImageSampler};
 use bevy_math::{AspectRatio, UVec2};
 use tracing::warn;
-use wgpu::{Extent3d, TextureFormat, TextureViewDescriptor};
+use wgpu::{Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension};
 
 /// The GPU-representation of an [`Image`].
 /// Consists of the [`Texture`], its [`TextureView`] and the corresponding [`Sampler`], and the texture's size.
@@ -30,6 +30,7 @@ impl RenderAsset for GpuImage {
         SRes<RenderDevice>,
         SRes<RenderQueue>,
         SRes<DefaultImageSampler>,
+        SRes<RenderAdapter>,
     );
 
     #[inline]
@@ -64,9 +65,32 @@ impl RenderAsset for GpuImage {
     fn prepare_asset(
         image: Self::SourceAsset,
         _: AssetId<Self::SourceAsset>,
-        (render_device, render_queue, default_sampler): &mut SystemParamItem<Self::Param>,
+        (render_device, render_queue, default_sampler, render_adapter): &mut SystemParamItem<
+            Self::Param,
+        >,
         previous_asset: Option<&Self>,
     ) -> Result<Self, PrepareAssetError<Self::SourceAsset>> {
+        let mut image = image;
+        // benilla: GL fixes a texture's target at creation from its layer count: one layer is a
+        // `TEXTURE_2D`, six a cube, a multiple of six a cube array. A `D2Array` image with such a
+        // count is then a texture its view and shader cannot sample, so it gets one more layer, a
+        // copy of its last (layer-major data, so the copy is the trailing slice).
+        let layers = image.texture_descriptor.size.depth_or_array_layers;
+        if render_adapter.get_info().backend == wgpu::Backend::Gl
+            && image.texture_descriptor.dimension == TextureDimension::D2
+            && (layers == 1 || layers % 6 == 0)
+            && image.data_order == wgpu::util::TextureDataOrder::LayerMajor
+            && image
+                .texture_view_descriptor
+                .as_ref()
+                .is_some_and(|v| v.dimension == Some(TextureViewDimension::D2Array))
+        {
+            image.texture_descriptor.size.depth_or_array_layers = layers + 1;
+            if let Some(data) = image.data.as_mut() {
+                let layer = data.len() / layers as usize;
+                data.extend_from_within(data.len() - layer..);
+            }
+        }
         let had_data = image.data.is_some();
         let texture = if let Some(ref data) = image.data {
             render_device.create_texture_with_data(

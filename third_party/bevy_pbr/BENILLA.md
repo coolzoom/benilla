@@ -27,6 +27,13 @@ There the `bevy_render` pipeline cache adds `NO_CUBE_ARRAY_TEXTURES_SUPPORT`, an
 WoW has no point-light shadows, so nothing the client draws loses one. On every other backend the
 behaviour is upstream's byte for byte.
 
+## Patch 2 — the sun's shadow map has at least two layers on GL
+
+`prepare_lights` sizes the directional shadow map to the enabled cascades, and benilla's sun has
+one. wgpu-hal's GLES backend makes a one-layer texture a `TEXTURE_2D`, which the `D2Array` view and
+the shader's `sampler2DArrayShadow` cannot sample, so every sun shadow vanished. On GL the map is
+allocated with at least two layers; the second is never drawn or read.
+
 ## How to check
 
     diff -ru ~/.cargo/registry/src/index.crates.io-*/bevy_pbr-0.18.1/src third_party/bevy_pbr/src
