@@ -3,8 +3,10 @@
 #
 #   ./dev.sh        menu
 #   ./dev.sh 1      toolchain, WoW link, server and account
+#   ./dev.sh check  cargo check --profile play -p benilla (no link)
 #   ./dev.sh 2      cargo build --profile play -p benilla
 #   ./dev.sh 3      run target/play/benilla
+#   ./dev.sh trim   drop host release/ship and stale incremental caches
 #
 # Local paths and login are written to .benilla.local (gitignored) and exported
 # for 2 and 3. The install itself stays the WoW link at the repo root.
@@ -296,6 +298,30 @@ build_client() {
     echo "编译完成: target/play/benilla"
 }
 
+check_client() {
+    echo "== 检查编译错误 =="
+    require_rust || return 1
+    echo "cargo check --profile play -p benilla"
+    benilla_prune_incremental
+    cargo check --profile play -p benilla || return 1
+}
+
+trim_cache() {
+    echo "== 清理用不到的编译产物 =="
+    local before after sub
+    before="$(du -sh "$CARGO_TARGET_DIR" 2>/dev/null | awk '{print $1}')"
+    benilla_prune_incremental
+    for sub in release ship; do
+        if [ -d "$CARGO_TARGET_DIR/$sub" ]; then
+            echo "删除 target/$sub"
+            rm -rf "$CARGO_TARGET_DIR/$sub"
+        fi
+    done
+    after="$(du -sh "$CARGO_TARGET_DIR" 2>/dev/null | awk '{print $1}')"
+    echo "target: ${before:-无} -> ${after:-无}"
+    echo "保留 target/play、target/debug，以及安卓的 release 树。"
+}
+
 run_client() {
     echo "== 3 运行 =="
     require_rust || return 1
@@ -320,10 +346,12 @@ run_client() {
 }
 
 usage() {
-    echo "用法: ./dev.sh [1|2|3]"
-    echo "  1  配置环境"
-    echo "  2  编译"
-    echo "  3  运行"
+    echo "用法: ./dev.sh [1|2|3|check|trim]"
+    echo "  1      配置环境"
+    echo "  2      编译（play，要运行时用）"
+    echo "  3      运行"
+    echo "  check  只检查编译错误，不链接"
+    echo "  trim   删掉 host 的 release/ship，以及不会再复用的增量缓存"
 }
 
 menu() {
@@ -332,15 +360,19 @@ menu() {
     echo "  1) 配置环境"
     echo "  2) 编译"
     echo "  3) 运行"
+    echo "  4) 只检查编译错误"
+    echo "  5) 清理 release 和过期缓存"
     echo "  q) 退出"
-    printf '选择 [1/2/3/q]: '
+    printf '选择 [1/2/3/4/5/q]: '
     read -r choice || exit 0
     case "$choice" in
     1) configure || true ;;
     2) build_client || true ;;
     3) run_client || true ;;
+    4) check_client || true ;;
+    5) trim_cache || true ;;
     q | Q) exit 0 ;;
-    *) echo "请输入 1、2、3 或 q。" ;;
+    *) echo "请输入 1、2、3、4、5 或 q。" ;;
     esac
 }
 
@@ -348,6 +380,8 @@ case "${1:-}" in
 1) configure ;;
 2) build_client ;;
 3) run_client ;;
+4 | check) check_client ;;
+5 | trim) trim_cache ;;
 -h | --help) usage ;;
 "")
     while true; do

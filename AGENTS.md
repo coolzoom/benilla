@@ -16,13 +16,23 @@ vendored code.
 
 ## Compiling
 
-Desktop builds go through `./dev.sh 2`. Android builds go through `./android.sh 2`.
-Both source `scripts/cargo-env.sh`, which pins `CARGO_TARGET_DIR` to this checkout's
-`target/` and drops incremental caches whose fingerprint will never be reused.
+After a code edit, `./dev.sh check` (`cargo check --profile play -p benilla`). It
+reuses `target/play` and does not link. `./dev.sh 2` links the client when it has to
+run. Android builds go through `./android.sh 2`.
 
-Do not pass `--target-dir`. Do not export `CARGO_TARGET_DIR` or `RUSTFLAGS`. Do not
-run a bare `cargo build`: the dev profile is a second full dependency graph, and
-Cursor's sandbox points `CARGO_TARGET_DIR` at a new directory, so each of those
-builds is another ~10 GB copy left on disk.
+Both scripts source `scripts/cargo-env.sh`, which pins `CARGO_TARGET_DIR` to this
+checkout's `target/` and drops incremental caches whose fingerprint will never be
+reused. `./dev.sh trim` also deletes the host `release` and `ship` trees. It leaves
+`target/play`, `target/debug` (tests), and the Android release tree.
+
+Do not `cargo build --release` for a daily edit. Release has no incremental
+compilation and is a separate copy of the graph. Do not pass `--target-dir`,
+`--no-default-features`, or a feature set other than the defaults: each combination
+is another copy. Do not export `CARGO_TARGET_DIR` or `RUSTFLAGS`. Do not run a bare
+`cargo build`: that is the dev profile, a second full graph, and Cursor's sandbox
+points `CARGO_TARGET_DIR` at a new directory.
+
+Lua and XML under `crates/benilla-app/assets/ui` are read from disk while the `dev`
+feature is on (the default). Restart the client; do not recompile for those edits.
 
 @docs/METHOD.md
