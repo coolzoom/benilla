@@ -9,7 +9,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
-use super::cursor::{queue_cursor_update, CursorMacro, CursorPayload};
+use super::cursor::{raise_cursor_update, CursorMacro, CursorPayload};
 use super::Model;
 
 /// Macros per tab (`Blizzard_MacroUI.lua:1`), and so the character tab's base.
@@ -204,16 +204,17 @@ fn create_macro(
     Some(MacroIndex { per_character, pos }.lua_index())
 }
 
-/// `EditMacro(index, name, icon, body, local)`: an omitted argument leaves its field alone, since
-/// the stock UI calls it with disjoint halves, `(sel, name, icon)` from the rename popup and
-/// `(sel, nil, nil, text)` from `MacroFrame_SaveMacro`.
+/// `EditMacro(index, name, icon, body, local)`: an omitted name, icon or body leaves its field
+/// alone, since the stock UI calls it with disjoint halves, `(sel, name, icon)` from the rename
+/// popup and `(sel, nil, nil, text)` from `MacroFrame_SaveMacro`. The `local` flag is always
+/// written (`0x4f12dc`, `[macro+0x20]`), so an omitted one clears it.
 fn edit_macro(
     model: &mut Model,
     index: usize,
     name: Option<String>,
     texture: Option<Option<String>>,
     body: Option<String>,
-    local_only: Option<bool>,
+    local_only: bool,
 ) -> Option<usize> {
     let at = MacroIndex::split(index)?;
     let entry = model.macros.list_mut(at.per_character).get_mut(at.pos)?;
@@ -230,9 +231,7 @@ fn edit_macro(
     if let Some(body) = body {
         entry.body = clamp_chars(&body, MAX_MACRO_BODY);
     }
-    if let Some(local_only) = local_only {
-        entry.local_only = local_only;
-    }
+    entry.local_only = local_only;
     model.macros_dirty = true;
     model.macros_generation += 1;
     Some(index)
@@ -269,7 +268,7 @@ fn pickup_macro(model: &mut Model, index: usize) -> bool {
         texture: entry.texture.clone(),
     };
     model.cursor = Some(CursorPayload::Macro(payload));
-    queue_cursor_update(model);
+    raise_cursor_update(model);
     true
 }
 
@@ -280,11 +279,11 @@ fn opt_string(v: Option<&Value>) -> Option<String> {
     }
 }
 
-/// The `local` and `perCharacter` flags: `nil`, `false` and `0` are false, as in `UseAction`. The
-/// reference reads them with `GetBoolOrDefault` (`0x6f1c10`), which also takes `"0"` and any
-/// number that truncates to 0 as false; the stock popup passes a Lua boolean and never `local`.
+/// The `local` and `perCharacter` flags: `GetBoolOrDefault` (`0x6f1c10`) with default 0
+/// (`CreateMacro` `0x4f167b`, `0x4f168a`; `EditMacro` `0x4f19ad`), so `"0"` and `0.5` are false and
+/// `"yes"` true. The stock popup passes a Lua boolean and never `local`.
 fn flag(v: Option<&Value>) -> bool {
-    v.is_some_and(super::action::truthy_nonzero)
+    super::binding_abi::bool_or_default(v, false)
 }
 
 /// Register the macro globals.
@@ -393,10 +392,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             let name = opt_string(a.get(1));
             let body = opt_string(a.get(3));
-            let local_only = match a.get(4) {
-                None | Some(Value::Nil) => None,
-                other => Some(flag(other)),
-            };
+            let local_only = flag(a.get(4));
             Ok(
                 match edit_macro(&mut model, index, name, texture, body, local_only) {
                     Some(i) => Value::Integer(i as i64),
@@ -410,15 +406,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "DeleteMacro",
         lua.create_function(|lua, index: usize| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            Ok(delete_macro(&mut model, index))
+            delete_macro(&mut model, index);
+            Ok(())
         })?,
     )?;
 
     g.set(
         "PickupMacro",
         lua.create_function(|lua, index: usize| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            Ok(pickup_macro(&mut model, index))
+            super::tick::verb(lua, |model| pickup_macro(model, index));
+            Ok(())
         })?,
     )?;
 
@@ -504,7 +501,7 @@ mod tests {
         );
 
         // The character macro keeps its own base after the delete.
-        assert!(s.eval::<bool>("return DeleteMacro(1)").unwrap());
+        assert!(delete_macro(&mut s.model_mut(), 1));
         assert_eq!(
             s.eval::<(i64, i64)>("local a, c = GetNumMacros() return a, c")
                 .unwrap(),
@@ -624,11 +621,8 @@ mod tests {
         s.run(r#"CreateMacro("Ambush", 1, "/cast Ambush")"#)
             .unwrap();
 
-        assert!(
-            !s.eval::<bool>("return PickupMacro(5)").unwrap(),
-            "empty slot"
-        );
-        assert!(s.eval::<bool>("return PickupMacro(1)").unwrap());
+        assert!(!pickup_macro(&mut s.model_mut(), 5), "empty slot");
+        assert!(pickup_macro(&mut s.model_mut(), 1));
         assert_eq!(
             s.cursor_payload(),
             Some(CursorPayload::Macro(CursorMacro {
@@ -637,7 +631,7 @@ mod tests {
             }))
         );
         assert!(
-            !s.eval::<bool>("return PickupMacro(1)").unwrap(),
+            !pickup_macro(&mut s.model_mut(), 1),
             "a macro button is a source, never a drop target"
         );
     }

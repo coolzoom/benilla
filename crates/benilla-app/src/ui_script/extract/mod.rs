@@ -97,7 +97,6 @@ fn content_kind(c: &QuadContent) -> &'static str {
         QuadContent::Texture { .. } => "texture",
         QuadContent::ColorWheel => "colorwheel",
         QuadContent::ColorValue { .. } => "colorvalue",
-        QuadContent::Backdrop { .. } => "backdrop",
         QuadContent::Text { .. } => "text",
     }
 }
@@ -115,8 +114,9 @@ pub(crate) fn tiling_axes(uv: &UvRect) -> (bool, bool) {
 }
 
 /// The [`UiQuad::uv_clamp`] window of an atlas crop, inset half a texel so a magnified cell does
-/// not filter in its neighbour. A tiling axis is left alone, as
-/// [`benilla_ui::script::inset_atlas_bleed`] does; a whole-texture axis needs no window.
+/// not filter in its neighbour (in `ChatBubble-Backdrop`, a white alpha-0 column: a pale line
+/// through the speech bubble). A tiling axis is left alone, or each period would land short and
+/// walk the art; a whole-texture axis needs no window.
 fn uv_clamp_window(uv: &UvRect, size: (u32, u32)) -> Option<[f32; 4]> {
     let mut out = [1.0, 1.0, 0.0, 0.0]; // both axes off: `min > max`
     let mut any = false;
@@ -283,7 +283,6 @@ fn span_bounds(spans: &[u32], i: usize) -> (usize, usize) {
 fn splice_simple(eq: &benilla_ui::script::ExtractedQuad) -> bool {
     match &eq.content {
         QuadContent::Frame
-        | QuadContent::Backdrop { .. }
         // At most one quad and one idempotent tile request.
         | QuadContent::ModelPane { .. }
         | QuadContent::ColorWheel
@@ -428,7 +427,11 @@ pub(super) fn tick_script(
     mut last_seam: Local<f32>,
     // The `scale_factor` measures were last answered under; 0 until the first frame.
     mut last_dpi: Local<f32>,
-    ui_scale: Res<super::UiScaleCvar>,
+    // The dial, `UIParent`'s scale in the VM, and the automatic scale's last display.
+    (ui_scale, mut auto_cache): (
+        Res<super::UiScaleCvar>,
+        Option<ResMut<super::UiAutoScaleCache>>,
+    ),
     mut ui_cost: ResMut<super::UiFrameCost>,
     mut pass: ResMut<super::UiPassState>,
 ) {
@@ -445,9 +448,9 @@ pub(super) fn tick_script(
     };
     let (w, h) = (window.width(), window.height());
     // The client's UI space is 768 units tall at every aspect (`f(screenH) = 768`, `0x41ad10`; the
-    // caret's `H_px/192`, `0x77b8c0`), `768/uiScale` with the dial. The VM lives in it: quads
-    // scale ×s out, and the mouse and the measures ÷s in.
-    let s = super::seam_scale(h, ui_scale.0);
+    // caret's `H_px/192`, `0x77b8c0`), the dial being `UIParent`'s scale inside it. The VM lives in
+    // it: quads scale ×s out, and the mouse and the measures ÷s in.
+    let s = super::seam_scale(h);
     // A moved seam scale or DPI stales every text metric the engine caches: integer-stepped
     // advances do not rescale, and the size snap moves a string's width by several percent,
     // enough for the ellipsis to eat fitting text. A monitor hop moves the DPI alone.
@@ -489,9 +492,28 @@ pub(super) fn tick_script(
     {
         let _span = bevy::log::info_span!("ui_script: tick").entered();
         let resized = script.set_screen_size(w / s, if h > 0.0 { h / s } else { 768.0 });
-        // A resize re-runs what the interface computed from the old screen size.
-        if resized {
-            super::manifest::on_screen_resized(&script);
+        // The UI scale is `UIParent`'s, which only the in-game state has; the glue lays out on
+        // the root alone (`0x46dd30`).
+        if script.vm_kind() == benilla_ui::script::VmKind::InGame {
+            // A display change re-applies the UI scale (`0x492e90`), whose narrow-aspect cap
+            // follows the window; a moved dial applies once, as its CVar callback does
+            // (`0x490770`). Deviation: the reference then re-reads the aspect (`0x492f13`), and on
+            // a change of 0.001 or more calls `0x491380`, which sets the reload trigger
+            // (`[0xb4b3f4]`) when the script-context check `0x494a50(0xa)` allows it; here a
+            // resize re-lays out the live UI, the chat bubbles' window-derived `BubbleGeometry`
+            // with it, because the window resizes freely and a reload on each resize would tear
+            // down every addon's state mid-play.
+            if resized {
+                let display = (w.round() as u32, h.round() as u32);
+                let mut none = None;
+                let cache = auto_cache.as_deref_mut().map_or(&mut none, |c| &mut c.0);
+                script.apply_ui_scale(display, cache);
+            }
+            let rescaled = script.set_ui_scale(ui_scale.0);
+            // Either re-runs what the interface computed from the old `GetScreenHeight()`.
+            if resized || rescaled {
+                super::manifest::on_screen_resized(&script);
+            }
         }
         script.tick(time.delta_secs());
     }
@@ -504,7 +526,8 @@ pub(super) fn tick_script(
     let us_tick = lap();
     // ── The FontString measure round-trip, before the resolve ────────────────────────────────
     // A request reads only region data, never a resolved rect, and `resolve` writes no region's
-    // size, so measuring first lets the frame's one resolve see the answers.
+    // size, so measuring first lets the resolve below see the answers. The tick drained the layout
+    // after its walk; this resolve takes the measures and what the tick's tail moved.
     let mut measured_any = false;
     if let Some(atlas) = font_atlas.as_deref_mut() {
         measured_any = measure_fontstrings(&mut script, atlas, s, &mut ui_cost, ui_cost_wanted.0);
@@ -540,6 +563,9 @@ pub(super) fn tick_script(
                             path: r.font.as_deref(),
                             height: crate::ui_text::drawn_px(r.height, None, s * r.scale),
                             outline: r.outline, // the outline biases the stepped width
+                            spacing: 0.0,       // the gap moves rows, never counts them
+                            // The drawn shadow seeds each row, as the draw's does.
+                            shadow_x: r.shadow_x * s * r.scale,
                             alpha_gradient: None,
                         },
                     );
@@ -560,8 +586,13 @@ pub(super) fn tick_script(
     for w in script.take_warnings() {
         warn!("ui_script: {w}");
     }
-    // A runtime `LoadAddOn`'s record, appended to `Logs\FrameXML.log`.
-    super::load_log::write(script.take_load_log_writes());
+    // A runtime `LoadAddOn`'s record, appended to `Logs\FrameXML.log`; the glue has none, but
+    // whatever its VM drains is the glue log's.
+    let writes = script.take_load_log_writes();
+    match script.vm_kind() {
+        benilla_ui::script::VmKind::InGame => super::load_log::write(writes),
+        benilla_ui::script::VmKind::Glue => super::load_log::write_glue(writes),
+    }
 
     // ── The handover ────────────────────────────────────────────────────────────────────────
     *pass = super::UiPassState {
@@ -1403,44 +1434,6 @@ fn convert_entry(
                 ..default()
             });
         }
-        QuadContent::Backdrop {
-            path,
-            color,
-            uvs,
-            tile,
-        } => {
-            // A backdrop piece, the bg or one of the 8 border pieces, sampled `Repeat` when `tile`;
-            // its UVs are per-corner, as the TOP and BOTTOM edges are rotated.
-            let handle = assets.as_mut().and_then(|a| {
-                if tile {
-                    a.sprite_texture_tiled(&path, images)
-                } else {
-                    a.sprite_texture(&path, images)
-                }
-            });
-            // A missing BLP draws nothing.
-            let Some(handle) = handle else { return };
-            // The 8 border pieces share one atlas, so a `tile` piece is pulled half a texel in on
-            // its bounded axes; a stretched bg is a whole texture.
-            let uvs = match images.get(&handle) {
-                Some(img) if tile => {
-                    let sz = img.texture_descriptor.size;
-                    benilla_ui::script::inset_atlas_bleed(uvs, sz.width as f32, sz.height as f32)
-                }
-                _ => uvs,
-            };
-            let mut color = color;
-            color[3] *= eq.alpha;
-            out.push(UiQuad {
-                rect,
-                z_key: eq.z,
-                texture: Some(handle),
-                uv: UvRect::from_corners(uvs),
-                color,
-                clip,
-                ..default()
-            });
-        }
         QuadContent::Text {
             text,
             color,
@@ -1451,6 +1444,7 @@ fn convert_entry(
             text_height,
             shadow,
             outline,
+            spacing,
             alpha_gradient,
             world_seat,
         } => {
@@ -1470,6 +1464,7 @@ fn convert_entry(
                     text_height,
                     shadow,
                     outline,
+                    spacing,
                     alpha_gradient,
                     world_seat,
                 },
@@ -1726,9 +1721,10 @@ mod clip_plumb_tests {
         );
     }
 
-    /// At dial 0.5 the VM sees a 2048×1536 screen, and every window-px rect halves.
+    /// The dial is `UIParent`'s scale, so a ScrollFrame with no parent keeps its px rect and clip
+    /// at dial 0.5: the root stays 768 units tall.
     #[test]
-    fn the_uiscale_dial_scales_the_extracted_rects() {
+    fn the_uiscale_dial_leaves_a_parentless_frame_alone() {
         let mut app = app_with_scrolled_marker();
         app.insert_resource(crate::ui_script::UiScaleCvar(0.5));
         app.update();
@@ -1739,12 +1735,10 @@ mod clip_plumb_tests {
             .find(|q| q.color[0] == 1.0 && q.color[1] == 0.0 && q.color[2] == 0.0)
             .expect("the colored marker quad extracted");
 
-        // WoW space: top 1536 − 100 = 1436, bottom 1236, right 300; ×0.5 is y-up px 618..718,
-        // and y-down through the 768 window the top is 50 and the bottom 150.
         assert_eq!(
             marker.clip,
-            Some(Rect::new(0.0, 50.0, 150.0, 150.0)),
-            "dial 0.5 halves the px rect and re-hangs the frame from the taller virtual top"
+            Some(Rect::new(0.0, 100.0, 300.0, 300.0)),
+            "dial 0.5 moves nothing outside UIParent"
         );
     }
 

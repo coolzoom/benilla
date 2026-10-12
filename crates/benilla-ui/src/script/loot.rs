@@ -134,6 +134,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             data.texture = None;
             data.fill = None;
             data.circular = true;
+            model.note_art(rh);
             Ok(Value::Integer(1))
         })?,
     )?;
@@ -219,10 +220,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "LootSlotIsItem",
         lua.create_function(|lua, slot: usize| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(slot
-                .checked_sub(1)
-                .and_then(|n| model.loot.as_ref()?.rows.get(n)?.as_ref())
-                .is_some_and(|r| !r.is_coin))
+            Ok(flag(
+                slot.checked_sub(1)
+                    .and_then(|n| model.loot.as_ref()?.rows.get(n)?.as_ref())
+                    .is_some_and(|r| !r.is_coin),
+            ))
         })?,
     )?;
 
@@ -230,10 +232,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "LootSlotIsCoin",
         lua.create_function(|lua, slot: usize| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(slot
-                .checked_sub(1)
-                .and_then(|n| model.loot.as_ref()?.rows.get(n)?.as_ref())
-                .is_some_and(|r| r.is_coin))
+            Ok(flag(
+                slot.checked_sub(1)
+                    .and_then(|n| model.loot.as_ref()?.rows.get(n)?.as_ref())
+                    .is_some_and(|r| r.is_coin),
+            ))
         })?,
     )?;
 
@@ -339,7 +342,7 @@ mod tests {
     /// The region data behind a named texture: its portrait key and file.
     fn portrait_of(s: &UiScript, name: &str) -> (Option<String>, Option<String>) {
         let model = s.model_ref();
-        let id = model.region_names[name];
+        let id = model.region_by_name[name];
         let rh = *model.id_to_region.get(&id).expect("a region");
         let data = &model.region_data[&rh];
         (data.portrait_unit.clone(), data.texture.clone())

@@ -101,7 +101,7 @@ struct UnitFeedMemo {
     /// The lazy caches' landing counters: their per-frame `&mut` misses would trip `is_changed`.
     names_generation: gate::Watch,
     guild_generation: gate::Watch,
-    /// Whether `PLAYER_ENTERING_WORLD` has fired for this world entry.
+    /// Whether the world-enter events have fired for this world entry.
     entered_world: bool,
     /// Per token, the last snapshot pushed.
     last: HashMap<String, UnitState>,
@@ -931,6 +931,13 @@ pub(crate) fn snapshot(
         pvp_team: store.0.unit_race().map_or(-1, race_pvp_team),
         // `PLAYER_BYTES_3` byte 2, the city-protector title (`PVP_MEDAL<n>`), unset by vmangos.
         pvp_medal: store.0.player_pvp_medal().unwrap_or(0),
+        // The quest-log window, off a player alone: `IsUnitOnQuest` looks the guid up with
+        // TYPEMASK_PLAYER (`0x4dfe97`) before it reads `[obj+0xe68]`.
+        quest_log: if matches!(store.0.object_type(), Some(ObjectType::Player)) {
+            store.0.player_quest_log_window()
+        } else {
+            Default::default()
+        },
         // `is_player` and the creature-record fields come from [`enrich_unit`].
         ..Default::default()
     }
@@ -1147,6 +1154,15 @@ pub(crate) fn fire_transitions(
     if edges.moved(cur.guid, benilla_protocol::field::FIELD_UNIT_DYNAMIC_FLAGS) {
         script.fire_event("UNIT_DYNAMIC_FLAGS", vec![tok()]);
     }
+    // `UNIT_QUEST_LOG_CHANGED` (id 522), the player-window watch over the quest-log slots
+    // (`0x51bc63`: offset `0x28`, length `0xf0`, callback `0x51bd90`): one compare over the 60
+    // dwords, so one event however many moved. A group mate's ids are all of it on the wire.
+    let log = benilla_protocol::field::FIELD_PLAYER_QUEST_LOG_1_1;
+    if (log..log + 3 * u16::from(benilla_protocol::messages::PLAYER_QUEST_LOG_SLOTS))
+        .any(|i| edges.moved(cur.guid, i))
+    {
+        script.fire_event("UNIT_QUEST_LOG_CHANGED", vec![tok()]);
+    }
     // 1.12 names the power events per resource (`UNIT_MANA`, `UNIT_MAXRAGE`, …;
     // `UnitFrame.lua:190-199`), and `power_token` yields the suffix.
     if changed(|u| u64::from(u.power)) {
@@ -1171,13 +1187,90 @@ pub(crate) fn fire_transitions(
     }
     // `UNIT_FACTION`, the PvP-icon repaint, on the fields the icon reads and on the tapped bit: the
     // reference's dynamic-flags watcher (`0x600440`) fires event 29 on bit `0x4` (`0x6005a1` →
-    // `0x6005b0`) and has no arm for `0x8`.
-    if prev.is_none_or(|p| {
-        (p.pvp, p.is_pvp_ffa, &p.faction_group, p.tapped)
-            != (cur.pvp, cur.is_pvp_ffa, &cur.faction_group, cur.tapped)
-    }) {
+    // `0x6005b0`) and has no arm for `0x8`. Also on any change of `UNIT_FIELD_FACTIONTEMPLATE`, the
+    // watch bridge's id 29 (`0x51bbb0`, as for `UNIT_FLAGS` above): a template swap between two
+    // that name no faction group moves nothing in the tuple, yet changes the reaction.
+    let template_moved = edges.moved(
+        cur.guid,
+        benilla_protocol::field::FIELD_UNIT_FACTIONTEMPLATE,
+    );
+    if template_moved
+        || prev.is_none_or(|p| {
+            (p.pvp, p.is_pvp_ffa, &p.faction_group, p.tapped)
+                != (cur.pvp, cur.is_pvp_ffa, &cur.faction_group, cur.tapped)
+        })
+    {
         script.fire_event("UNIT_FACTION", vec![tok()]);
     }
+}
+
+/// `"player"`'s snapshot off our own descriptor: no reaction (the unit is ours), the raid icon,
+/// both faction-group spellings and the guild. One builder for [`feed_units`] and for the seat a
+/// `/reload`'s load runs under ([`live_player_seat`]).
+fn player_snapshot(
+    store: &ObjectStore,
+    guid: u64,
+    tables: &SnapshotTables,
+    names: &NameCache,
+    commands: &NetCommands,
+    group: &crate::ui_party::GroupState,
+    factions: Option<&Factions>,
+    guild: &mut crate::ui_guild::GuildState,
+) -> UnitState {
+    let name = names
+        .resolve_unit(guid, Some(store), commands)
+        .map(str::to_string);
+    let mut s = snapshot(store, guid, name, 0, tables.classes(), tables.types(names));
+    s.is_player = true;
+    s.raid_target = group.raid_target_index(guid);
+    s.faction_group = faction_group(store, factions);
+    s.faction_group_localized = faction_group_localized(store, factions);
+    // `GetGuildInfo`: the public guild fields (191/192) joined against the lazy guild cache.
+    s.guild = crate::ui_guild::unit_guild(&store.0, guild, commands);
+    s
+}
+
+/// `UnitXP("player")` and `UnitXPMax("player")` off our own descriptor, zero while unsent.
+fn xp_pair(store: &ObjectStore) -> (u32, u32) {
+    (
+        store.0.player_xp().unwrap_or(0),
+        store.0.player_next_level_xp().unwrap_or(0),
+    )
+}
+
+/// The live player a UI load seats before any file runs: its snapshot and XP pair, as
+/// [`feed_units`] pushes them.
+pub(crate) struct LivePlayerSeat {
+    pub(crate) state: UnitState,
+    pub(crate) xp: (u32, u32),
+}
+
+/// [`LivePlayerSeat`] for an exclusive edge, `None` before our own create. A `/reload` loads with
+/// the player object still in the world, so `UI_Init`'s file scope, `ADDON_LOADED` and
+/// `VARIABLES_LOADED` read it there as `PLAYER_LOGIN` does (`0x490168`).
+pub(crate) fn live_player_seat(
+    tables: SnapshotTables,
+    self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
+    names: Res<NameCache>,
+    commands: Res<NetCommands>,
+    group: Res<crate::ui_party::GroupState>,
+    factions: Option<Res<Factions>>,
+    mut guild: ResMut<crate::ui_guild::GuildState>,
+) -> Option<LivePlayerSeat> {
+    let (store, guid) = self_q.iter().next()?;
+    Some(LivePlayerSeat {
+        state: player_snapshot(
+            store,
+            guid.0,
+            &tables,
+            &names,
+            &commands,
+            &group,
+            factions.as_deref(),
+            &mut guild,
+        ),
+        xp: xp_pair(store),
+    })
 }
 
 fn feed_units(
@@ -1266,17 +1359,16 @@ fn feed_units(
     // A missing unit is `None`, which `set_unit` clears; a name miss lands on a later frame.
     let self_pair = self_q.iter().next();
     let player = self_pair.map(|(store, guid)| {
-        let name = names
-            .resolve_unit(guid.0, Some(store), &commands)
-            .map(str::to_string);
-        let mut s = snapshot(store, guid.0, name, 0, chr, types);
-        s.is_player = true;
-        s.raid_target = group.raid_target_index(guid.0);
-        s.faction_group = faction_group(store, factions.as_deref());
-        s.faction_group_localized = faction_group_localized(store, factions.as_deref());
-        // `GetGuildInfo`: the public guild fields (191/192) joined against the lazy guild cache.
-        s.guild = crate::ui_guild::unit_guild(&store.0, &mut guild, &commands);
-        s
+        player_snapshot(
+            store,
+            guid.0,
+            &tables,
+            &names,
+            &commands,
+            &group,
+            factions.as_deref(),
+            &mut guild,
+        )
     });
     // Log once when our template names no side, almost always GM mode (vmangos forces template
     // 35, group mask 0): every `UnitFactionGroup` surface loses its side, as in the reference.
@@ -1376,12 +1468,11 @@ fn feed_units(
         }
     }
 
-    // The XP pair and `PLAYER_XP_UPDATE`, ahead of the `PLAYER_ENTERING_WORLD` fire so its
-    // handlers read real values. The event fires on first sight too, at login and after a
-    // `/reload`, where the reference's field watchers stay silent.
+    // The XP pair and `PLAYER_XP_UPDATE`, ahead of the world-enter events so `PLAYER_LOGIN` and
+    // `PLAYER_ENTERING_WORLD` handlers read real values. The event fires on first sight too, at
+    // login and after a `/reload`, where the reference's field watchers stay silent.
     if let Some((store, _)) = self_q.iter().next() {
-        let xp = store.0.player_xp().unwrap_or(0);
-        let next = store.0.player_next_level_xp().unwrap_or(0);
+        let (xp, next) = xp_pair(store);
         if memo.last_xp != Some((xp, next)) {
             gate.audit("feed_units", "the XP pair");
             memo.last_xp = Some((xp, next));
@@ -1390,7 +1481,7 @@ fn feed_units(
         }
     }
 
-    // The rest snapshot (rest-state byte, pool, `PLAYER_FLAGS`), ahead of the entering-world fire
+    // The rest snapshot (rest-state byte, pool, `PLAYER_FLAGS`), ahead of the world-enter events
     // as the reference's descriptor is. Below `0x5ee990`'s local-GUID gate (`0x5eea93`) each arm
     // tests its own bits: `PLAYER_UPDATE_RESTING` on either edge of `0x20` (`0x5eead0`, fire
     // `0x5eeaf2`), `PLAYTIME_CHANGED` on `0x3000` (`0x5eeb65`, fire `0x5eeb6f`).
@@ -1481,12 +1572,16 @@ fn feed_units(
         }
     }
 
-    // `PLAYER_ENTERING_WORLD` once per world entry, after our descriptor lands, as the reference's.
-    // At world exit, re-arm it and forget the player-global memos so the next character seeds them.
+    // The world-enter cascade's events once per world entry, after our descriptor lands and the
+    // pushes above seat it: the reference runs the cascade from the local player's own create
+    // (`0x5deb60 call 0x4908c0`) and, on a `/reload`, from `UI_Init` (`0x490168`), the player in
+    // the world both times. `PLAYER_LOGIN` only when this VM's load armed it, so a worldport's
+    // re-entry fires `PLAYER_ENTERING_WORLD` alone. At world exit, re-arm the entry and forget the
+    // player-global memos so the next character seeds them.
     if self_pair.is_some() {
         if !memo.entered_world {
-            gate.audit("feed_units", "the PLAYER_ENTERING_WORLD arm");
-            script.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+            gate.audit("feed_units", "the world-enter events");
+            script.fire_world_enter();
             memo.entered_world = true;
         }
     } else if memo.entered_world {
@@ -2581,6 +2676,46 @@ mod tests {
         );
     }
 
+    /// `UNIT_QUEST_LOG_CHANGED` (id 522) is the player-window watch over the 60 quest-log dwords
+    /// (`0x51bc63`: offset `0x28`, length `0xf0`, callback `0x51bd90`): any of them moving fires it
+    /// once with the token, and a dword either side does not.
+    #[test]
+    fn a_quest_log_change_fires_unit_quest_log_changed_with_the_token() {
+        let fired = |prev: &UnitState, cur: &UnitState, edges: &[(u64, u16)]| -> Vec<String> {
+            let mut s = UiScript::new().unwrap();
+            s.run(
+                r#"
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("UNIT_QUEST_LOG_CHANGED")
+                f:SetScript("OnEvent", function() table.insert(SEEN, event .. ":" .. arg1) end)
+            "#,
+            )
+            .unwrap();
+            fire_transitions(&mut s, "party1", Some(prev), cur, &FieldEdges::of(edges));
+            s.eval::<Vec<String>>("return SEEN").unwrap()
+        };
+        const MATE: u64 = 0x300;
+        const LOG: u16 = benilla_protocol::field::FIELD_PLAYER_QUEST_LOG_1_1;
+        let before = UnitState {
+            exists: true,
+            has_object: true,
+            guid: MATE,
+            ..Default::default()
+        };
+        let mut after = before.clone();
+        after.quest_log[4][0] = 783;
+        let once = vec!["UNIT_QUEST_LOG_CHANGED:party1".to_string()];
+        assert_eq!(fired(&before, &after, &[(MATE, LOG + 12)]), once);
+        // One watch over the window: two slots moving in one pass is one event.
+        assert_eq!(
+            fired(&before, &after, &[(MATE, LOG), (MATE, LOG + 59)]),
+            once
+        );
+        assert!(fired(&before, &after, &[(MATE, LOG - 1), (MATE, LOG + 60)]).is_empty());
+        assert!(fired(&before, &after, &[(MATE + 1, LOG + 12)]).is_empty());
+    }
+
     /// LOST going down, GAINED going up (boot is in control); far sight on every change.
     #[test]
     fn the_control_and_far_sight_edges_fire_once_each_way() {
@@ -3152,6 +3287,42 @@ mod tests {
         assert_eq!(
             (alive.max_health, alive.max_power, alive.level),
             (feigning.max_health, feigning.max_power, feigning.level),
+        );
+    }
+
+    /// The quest-log window rides a player's snapshot whole, and a non-player's is all zero, as
+    /// `IsUnitOnQuest`'s lookup is TYPEMASK_PLAYER (`0x4dfe97`).
+    #[test]
+    fn a_players_snapshot_carries_its_quest_log_window_and_a_creatures_none() {
+        use benilla_protocol::messages::ObjectFields;
+
+        const OBJECT_TYPE: u16 = 2;
+        const QUEST_LOG_1_1: u16 = 198;
+        let log = [
+            (QUEST_LOG_1_1, 783),
+            (QUEST_LOG_1_1 + 1, 0x0100_0003),
+            (QUEST_LOG_1_1 + 57, 7),
+        ];
+        let snap = |type_bits: u32| {
+            snapshot(
+                &ObjectStore(ObjectFields::from_pairs(
+                    &[log.as_slice(), &[(OBJECT_TYPE, type_bits)]].concat(),
+                )),
+                0,
+                None,
+                0,
+                None,
+                Default::default(),
+            )
+        };
+        let player = snap(0x19);
+        assert_eq!(player.quest_log[0], [783, 0x0100_0003, 0]);
+        assert_eq!(player.quest_log[19], [7, 0, 0]);
+        assert_eq!(player.quest_log[1], [0, 0, 0]);
+        assert_eq!(
+            snap(0x09).quest_log,
+            [[0; 3]; 20],
+            "a creature has no PLAYER block"
         );
     }
 

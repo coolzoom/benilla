@@ -209,20 +209,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     "SetGuildRecruitmentMode: invalid mode",
                 ));
             }
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let mode = n as u8;
-            if model.guild_recruitment_mode != mode {
-                model.guild_recruitment_mode = mode;
-                model.guild_recruitment_changed = true;
-            }
-            // `0x49ea79 jne` / `0x49ea7b jmp 0x49ea90`: the cascade, on the new value alone.
-            if mode == 1 {
-                model.guild_recruitment_cascade = true;
-            }
-            // `0x4a00a4`/`0x4a00a9`: `UPDATE_CHAT_WINDOWS`, on every successful call.
-            model
-                .pending_events
-                .push(("UPDATE_CHAT_WINDOWS".to_string(), Vec::new()));
+            super::tick::verb(lua, |model| {
+                let mode = n as u8;
+                if model.guild_recruitment_mode != mode {
+                    model.guild_recruitment_mode = mode;
+                    model.guild_recruitment_changed = true;
+                }
+                // `0x49ea79 jne` / `0x49ea7b jmp 0x49ea90`: the cascade, on the new value alone.
+                if mode == 1 {
+                    model.guild_recruitment_cascade = true;
+                }
+                // `0x4a00a4`/`0x4a00a9`: `UPDATE_CHAT_WINDOWS`, on every successful call, in place.
+                model.raise("UPDATE_CHAT_WINDOWS", Vec::new());
+            });
             Ok(())
         })?,
     )?;
@@ -398,7 +397,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     .to_string(),
                 _ => return Err(mlua::Error::runtime(r#"Usage: LeaveChannelByName("name")"#)),
             };
-            if super::chat_window::leading_int(&key) != 0 {
+            if super::binding_abi::s_str_to_int(&key) != 0 {
                 push(lua, ChannelCommand::Leave { name: key });
                 return Ok(());
             }
@@ -710,6 +709,22 @@ mod command_tests {
             s.take_chat_window_changes().is_empty(),
             "…and strips no window: a slot name never equals a window entry"
         );
+
+        // `SStrToInt` takes no `+`: "+2" is a channel name, so its window entry is stripped, which
+        // the numeric leg (a slot, never a window entry) does not do.
+        s.run("AddChatWindowChannel(1, '+2')").unwrap();
+        s.take_channel_commands();
+        s.take_chat_window_changes();
+        s.run("LeaveChannelByName('+2')").unwrap();
+        assert!(
+            !s.chat_window_looks()[0]
+                .channels
+                .iter()
+                .any(|(c, _)| c == "+2"),
+            "a '+'-prefixed key is a name"
+        );
+        s.take_channel_commands();
+        s.take_chat_window_changes();
 
         s.run("LeaveChannelByName('general')").unwrap();
         assert_eq!(

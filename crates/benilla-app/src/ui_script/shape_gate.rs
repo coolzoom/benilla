@@ -5,7 +5,8 @@
 //! are gated with arity. The table says per row what to trust: `arity_conf = exact`, kinds only
 //! where `kinds_conf = agree`, never `argc_conf`. Only query verbs are probed, a call that raises
 //! is skipped, and a name registered from several tables (`GetBuildInfo` is 5 in the glue table
-//! `0x8373b8`, 3 in-game at `0x83de68`) is read at its non-glue row.
+//! `0x8373b8`, 3 in-game at `0x83de68`) is read at its non-glue row. The boolean gate alone reads every `global` row, whatever its
+//! `arity_conf`, and adds each row whose kinds are `(nil) | (number)` to the query verbs.
 
 /// Globals known to answer the wrong arity: a name, the reference's arity and the reason. The
 /// list may only shrink.
@@ -727,21 +728,66 @@ fn every_widget_method_answers_the_reference_s_return_kinds() {
     );
 }
 
-/// Argument tuples the boolean gate tries in order until a call returns. A plausible wrong
-/// argument can change which kinds come back, which is why the kind gate passes only a unit
-/// token, but it never turns `1` into `true`.
-const ARG_LADDER: &[&str] = &["", "\"player\"", "1", "1, 1", "\"player\", 1"];
+/// Argument tuples the boolean gate tries, every one that returns being measured: a plausible
+/// wrong argument can change which kinds come back, which is why the kind gate passes only a unit
+/// token, but it never turns `1` into `true`. The ids and indices reach the rows
+/// [`seed_boolean_probe_state`] pushes, each leg of a predicate on its own tuple.
+const ARG_LADDER: &[&str] = &[
+    "",
+    "\"player\"",
+    "1",
+    "2",
+    "3",
+    "1, 1",
+    "1, 2",
+    "2, 1",
+    "\"player\", 1",
+    "\"player\", \"player\"",
+];
 
-/// 1.12 has no boolean query: of the table's trustworthy rows only `IsPetAttackActive` and Lua's
-/// own `rawequal` answer a `boolean`, and every other predicate pushes `1` or `nil`, which
-/// `x == 1`, `tostring(x)` or a saved variable tell apart from `true`.
-#[test]
-fn no_query_binding_answers_a_lua_boolean() {
-    // The reference's own two; the list may only shrink.
-    const REFERENCE_BOOLEANS: &[&str] = &["IsPetAttackActive", "rawequal"];
+/// The global bindings the boolean gate probes: every `global` row of the table, whatever its
+/// name or `arity_conf`. 1.12 has no boolean-returning global but `IsPetAttackActive`, so a
+/// `Pickup*` or `Place*` verb that hands back whether it moved something fails here as readily as
+/// a predicate that answers `true` (`LootSlotIsItem`, `Resurrect*`, `Check*Dist`).
+fn predicate_names() -> Vec<String> {
+    let tsv = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../reference/1.12-shapes.tsv"
+    );
+    let text = std::fs::read_to_string(tsv).expect("reference/1.12-shapes.tsv");
+    let mut names: Vec<String> = text
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.starts_with("name\t"))
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            (f.len() >= 10 && f[4] == "global" && !NOT_PROBED.contains(&f[0]))
+                .then(|| f[0].to_string())
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
 
-    let all = rows();
-    let mut s = benilla_ui::script::UiScript::new().expect("VM");
+/// Globals the boolean gate leaves alone: they end the session or the VM, not answer a value.
+const NOT_PROBED: &[&str] = &[
+    "Quit",
+    "ForceQuit",
+    "Logout",
+    "CancelLogout",
+    "ReloadUI",
+    "RestartGx",
+];
+
+/// The state the predicates that answer only against state read from: a seated player, two
+/// talents (an ordinary one met and learnable, an exceptional one neither), two loot rolls (a
+/// resolved bind-on-pickup one and one still in flight), a respec question in range, a quest log
+/// with one finished line. Each carries both legs of its flags.
+fn seed_boolean_probe_state(s: &mut benilla_ui::script::UiScript) {
+    use benilla_ui::script::{
+        LootRollEntry, LootRollsState, QuestLogEntryView, QuestLogObjectiveView, QuestLogState,
+        TalentPrereqView, TalentTabView, TalentUiState, TalentView,
+    };
     s.set_unit(
         "player",
         Some(benilla_ui::script::UnitState {
@@ -751,24 +797,101 @@ fn no_query_binding_answers_a_lua_boolean() {
             ..Default::default()
         }),
     );
+    s.set_talents(TalentUiState {
+        tabs: vec![TalentTabView {
+            name: "Probe".into(),
+            background: "Interface\\TalentFrame\\Probe-".into(),
+            points_spent: 0,
+        }],
+        talents: vec![vec![
+            TalentView {
+                name: "Ordinary".into(),
+                tier: 1,
+                column: 1,
+                max_rank: 5,
+                meets_prereq: true,
+                ..Default::default()
+            },
+            TalentView {
+                name: "Exceptional".into(),
+                tier: 2,
+                column: 1,
+                max_rank: 1,
+                exceptional: true,
+                prereqs: vec![
+                    TalentPrereqView {
+                        tier: 1,
+                        column: 1,
+                        learnable: true,
+                    },
+                    TalentPrereqView {
+                        tier: 1,
+                        column: 2,
+                        learnable: false,
+                    },
+                ],
+                ..Default::default()
+            },
+        ]],
+        points: (1, 0),
+    });
+    s.set_loot_rolls(LootRollsState {
+        rolls: vec![
+            LootRollEntry {
+                roll_id: 1,
+                name: Some("Bound".into()),
+                texture: Some("Interface\\Icons\\INV_Misc_QuestionMark".into()),
+                quality: Some(4),
+                bind_on_pickup: true,
+                item_id: 1,
+                ..Default::default()
+            },
+            LootRollEntry {
+                roll_id: 2,
+                item_id: 2,
+                ..Default::default()
+            },
+        ],
+    });
+    s.set_talent_master_pending(true);
+    s.set_quest_log(QuestLogState {
+        num_quests: 1,
+        entries: vec![QuestLogEntryView {
+            quest_id: 1,
+            title: "Probe".into(),
+            objectives: vec![QuestLogObjectiveView {
+                text: "Probes slain: 1/1".into(),
+                kind: "monster".into(),
+                finished: true,
+                cur: 1,
+                req: 1,
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+}
+
+/// 1.12 has no boolean query: of the table's trustworthy rows only `IsPetAttackActive` and Lua's
+/// own `rawequal` answer a `boolean`, and every other predicate pushes `1` or `nil`, which
+/// `x == 1`, `tostring(x)` or a saved variable tell apart from `true`.
+#[test]
+fn no_query_binding_answers_a_lua_boolean() {
+    // The reference's own two; the list may only shrink.
+    const REFERENCE_BOOLEANS: &[&str] = &["IsPetAttackActive", "rawequal"];
+
+    let mut s = benilla_ui::script::UiScript::new().expect("VM");
+    seed_boolean_probe_state(&mut s);
     s.run(KIND_HELPER).expect("kind helper");
 
-    let mut names: Vec<&str> = all
-        .iter()
-        .map(|r| r.name.as_str())
-        .filter(|n| {
-            ["Get", "Is", "Has", "Can", "Unit", "Num"]
-                .iter()
-                .any(|p| n.starts_with(p))
-        })
-        .filter(|n| !REFERENCE_BOOLEANS.contains(n))
+    let names: Vec<String> = predicate_names()
+        .into_iter()
+        .filter(|n| !REFERENCE_BOOLEANS.contains(&n.as_str()))
         .collect();
-    names.sort_unstable();
-    names.dedup();
 
-    let mut checked = 0usize;
+    let mut measured = std::collections::BTreeSet::new();
     let mut booleans: Vec<String> = Vec::new();
-    for name in names {
+    for name in &names {
         for args in ARG_LADDER {
             let probe = format!(
                 "if type({name}) ~= 'function' then return '?' end \
@@ -781,17 +904,23 @@ fn no_query_binding_answers_a_lua_boolean() {
             if got == "?" {
                 continue;
             }
-            checked += 1;
-            if got.split(',').any(|k| k == "boolean") {
+            measured.insert(name.as_str());
+            // One line per binding: the first rung that answers a boolean.
+            if got.split(',').any(|k| k == "boolean")
+                && !booleans
+                    .last()
+                    .is_some_and(|l| l.starts_with(&format!("{name}(")))
+            {
                 booleans.push(format!("{name}({args}) answers ({got})"));
             }
-            break;
         }
     }
 
     assert!(
-        checked >= 300,
-        "the boolean gate measured only {checked} bindings — it has stopped covering anything"
+        // A floor, not a target: raise it when coverage rises, never lower it to fit a change.
+        measured.len() >= 500,
+        "the boolean gate measured only {} bindings — it has stopped covering anything",
+        measured.len()
     );
     assert!(
         booleans.is_empty(),
@@ -831,8 +960,17 @@ fn no_widget_method_answers_a_lua_boolean() {
         }
     }
 
-    // A widget predicate takes a script or object-type name more often than a number.
-    const WIDGET_ARGS: &[&str] = &["", "\"OnClick\"", "\"Frame\"", "1", "1, 1"];
+    // A widget predicate takes a script or object-type name more often than a number, and
+    // `IsOwned` a frame; `PGFrame` is the probe frame made above.
+    const WIDGET_ARGS: &[&str] = &[
+        "",
+        "\"OnClick\"",
+        "\"Frame\"",
+        "1",
+        "1, 1",
+        "PGFrame",
+        "1, 5",
+    ];
 
     let mut checked = 0usize;
     let mut booleans: Vec<String> = Vec::new();
@@ -845,13 +983,8 @@ fn no_widget_method_answers_a_lua_boolean() {
             continue;
         }
         let (name, table) = (f[0], f[3]);
-        if !["Get", "Is", "Has", "Can", "Num"]
-            .iter()
-            .any(|p| name.starts_with(p))
-        {
-            continue;
-        }
-        // No widget method answers a boolean in the reference, so none is exempt here.
+        // No widget method answers a boolean in the reference, so none is exempt here, whatever
+        // its name: `AtBottom`, `SetAlphaGradient` and `IsOwned` push 1 or nil.
         let Some(obj) = made.get(table) else { continue };
         for args in WIDGET_ARGS {
             let probe = format!(
@@ -868,8 +1001,8 @@ fn no_widget_method_answers_a_lua_boolean() {
             checked += 1;
             if got.split(',').any(|k| k == "boolean") {
                 booleans.push(format!("{obj}:{name}({args}) answers ({got})"));
+                break;
             }
-            break;
         }
     }
 

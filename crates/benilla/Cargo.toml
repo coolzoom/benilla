@@ -17,6 +17,8 @@ tracy = ["benilla-app/tracy"]
 trace_chrome = ["benilla-app/trace_chrome"]
 # DLSS 5 Neural Rendering, intentionally opt-in: normal builds neither link NGX nor select a DLL.
 dlss = ["benilla-app/dlss"]
+# Forwards to benilla-app's `bevy_dynamic_linking`, which enables bevy/dynamic_linking.
+bevy_dynamic_linking = ["benilla-app/bevy_dynamic_linking"]
 [dependencies]
 # `default-features = false`, or `--no-default-features` here still builds benilla-app with `dev`.
 benilla-app = { path = "../benilla-app", default-features = false }

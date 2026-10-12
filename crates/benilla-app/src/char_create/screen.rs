@@ -110,6 +110,7 @@ fn spawn_screen(
 
     let root = commands
         .spawn((
+            crate::glue::NativeGlue,
             CharCreateUi { s },
             DynTint::Backdrop,
             GlobalZIndex(SCREEN_Z),

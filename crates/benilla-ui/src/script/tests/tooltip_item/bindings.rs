@@ -424,8 +424,12 @@ fn ts_recipe(spell_id: u32, name: &str, group: (u32, u32, &str)) -> TradeSkillRe
 fn set_trade_skill_item_indexes_visible_rows_not_raw_recipes() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
-    s.run(r#"local tt = CreateFrame("GameTooltip", "TT")"#)
-        .unwrap();
+    // Owned, as the stock hover owns it before the setter; an unowned tooltip's show hides it.
+    s.run(
+        r#"local tt = CreateFrame("GameTooltip", "TT")
+           tt:SetOwner(CreateFrame("Frame", "TTOwner"), "ANCHOR_NONE")"#,
+    )
+    .unwrap();
 
     // Two groups, two recipes each. Visible order: [1] "Bolts" header, [2] Alpha Bolt,
     // [3] Beta Bolt, [4] "Cloak" header, [5] Alpha Cloak, [6] Beta Cloak.
@@ -568,6 +572,11 @@ fn set_merchant_compare_item_answers_one_or_nil_per_candidate_slot() {
         r#"
         CreateFrame("GameTooltip", "ShoppingTooltip1"):Hide()
         CreateFrame("GameTooltip", "ShoppingTooltip2"):Hide()
+        -- Owned, as the stock compare owns them before the setter; an unowned tooltip's show
+        -- hides it.
+        local owner = CreateFrame("Frame", "CompareOwner")
+        ShoppingTooltip1:SetOwner(owner, "ANCHOR_NONE")
+        ShoppingTooltip2:SetOwner(owner, "ANCHOR_NONE")
     "#,
     )
     .unwrap();
@@ -744,6 +753,82 @@ fn item_bindings_return_the_pushed_repair_cost() {
         assert(bag == 567, "bag: " .. tostring(bag))
         local _, whole = tt:SetBagItem(0, 2)
         assert(whole == 0, "no cost: " .. tostring(whole))
+    "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty());
+}
+
+/// `SetInventoryItem` (`0x532ee0`) and `SetBagItem` (`0x534620`) push `hasCooldown` as the number 1
+/// (`0x5332d3`, `0x534958`) or nil (`0x5332da`, `0x534966`), never a Lua boolean, and the counts
+/// stay 3 and 2.
+#[test]
+fn item_bindings_push_has_cooldown_as_one_or_nil() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    let mut inv: InventorySlots = Default::default();
+    inv[16] = Some(InvSlotView {
+        item_id: 8200,
+        name: Some("Timed Blade".into()),
+        quality: 2,
+        duration_ms: Some(60_000),
+        ..Default::default()
+    });
+    inv[17] = Some(InvSlotView {
+        item_id: 8200,
+        name: Some("Timed Blade".into()),
+        quality: 2,
+        ..Default::default()
+    });
+    s.set_inventory_slots(inv);
+    let slot = |cooldown, duration_ms| ContainerSlot {
+        item_id: 8200,
+        count: 1,
+        quality: Some(2),
+        link: Some("|cff1eff00|Hitem:8200:0:0:0|h[Timed Blade]|h|r".into()),
+        cooldown,
+        duration_ms,
+        ..Default::default()
+    };
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 24,
+            slots: HashMap::from([
+                (1, slot(Some((1000, 30_000, true)), None)),
+                (2, slot(None, None)),
+                (3, slot(None, Some(60_000))),
+            ]),
+        }),
+    );
+    s.set_item_template(
+        8200,
+        ItemTemplateView {
+            name: "Timed Blade".into(),
+            quality: 2,
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0)
+        a:SetWidth(10); a:SetHeight(10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        -- `arg.n` counts the returns (`select` is 5.1's, not a 1.12 global).
+        local function r(...) return arg.n, arg[2] end
+        local function b(...) return arg.n, arg[1] end
+        local n, cd = r(tt:SetInventoryItem("player", 16))
+        assert(n == 3 and cd == 1 and type(cd) == "number", "timed item: " .. tostring(cd))
+        n, cd = r(tt:SetInventoryItem("player", 17))
+        assert(n == 3 and cd == nil, "plain item: " .. tostring(cd))
+        n, cd = b(tt:SetBagItem(0, 1))
+        assert(n == 2 and cd == 1 and type(cd) == "number", "running cooldown: " .. tostring(cd))
+        n, cd = b(tt:SetBagItem(0, 2))
+        assert(n == 2 and cd == nil, "cold item is nil, not false: " .. tostring(cd))
+        n, cd = b(tt:SetBagItem(0, 3))
+        assert(n == 2 and cd == 1, "timed item: " .. tostring(cd))
     "#,
     )
     .unwrap();

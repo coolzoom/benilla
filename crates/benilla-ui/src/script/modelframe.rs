@@ -35,6 +35,26 @@ impl Model {
         768.0 * (a * a + 1.0).sqrt()
     }
 
+    /// `ApplyRect`'s size threshold, 2⁻²² in the reference's layout units (`0x76b5e7`,
+    /// `0x76b602`, `[0x8029d4]`), in ours: [`crate::layout::SIZE_EPS`] times the layout unit.
+    pub(crate) fn size_eps(&self) -> f64 {
+        crate::layout::SIZE_EPS * f64::from(self.layout_unit())
+    }
+
+    /// The aspect globals `SetPoint`'s unchanged-anchor test quantizes offsets by
+    /// ([`crate::layout::Anchors::set`]), for the screen aspect [`Self::layout_unit`] reads.
+    pub(crate) fn layout_units(&self) -> crate::layout::LayoutUnits {
+        let (w, h) = (self.screen.width(), self.screen.height());
+        let a = if h > 0.0 && w > 0.0 { w / h } else { 4.0 / 3.0 };
+        crate::layout::LayoutUnits::from_aspect(a)
+    }
+
+    /// The drain's keep threshold, 1e-5 in the reference's layout units (`[0x80c5c8]`, tested in
+    /// `0x768d20`), in ours: [`crate::layout::RESOLVE_EPS`] times the layout unit.
+    pub(crate) fn resolve_eps(&self) -> f64 {
+        crate::layout::RESOLVE_EPS * f64::from(self.layout_unit())
+    }
+
     /// The implicit rect: a pane with no authored size takes its file's bounding-box extent, in
     /// layout units, as the reference's geometry overrides answer it (`0x76d080`, `0x76d0d0`).
     pub(crate) fn apply_implicit_rect(&mut self, h: FrameHandle) {
@@ -66,9 +86,8 @@ impl Model {
             input.width.to_bits() != w.to_bits() || input.height.to_bits() != ht.to_bits();
         input.width = w;
         input.height = ht;
-        if changed {
-            self.touch_layout_frame(h);
-        }
+        // The model-ready size write invalidates the frame (`0x76ce70`).
+        self.invalidate_frame(h, changed);
         if let Some(KindState::Model(m)) = self.arena.frame_mut(h).map(|f| &mut f.kind_state) {
             m.implicit_size = true;
         }
@@ -507,12 +526,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    lua.set_named_registry_value(REG_MODEL_METHODS, m)?;
-    playermodel_install(lua)
+    lua.set_named_registry_value(REG_MODEL_METHODS, m)
 }
 
 /// `PlayerModel`'s own three methods (table `0x84f1fc`); the rest are `Model`'s, reached on a miss.
-fn playermodel_install(lua: &Lua) -> mlua::Result<()> {
+/// Only the in-game state registers it (`0x506230`, from `0x490260`), where `Model`'s is in the
+/// widget set both states install (`0x76f840`, from `0x706350`).
+pub(super) fn install_player_model(lua: &Lua) -> mlua::Result<()> {
     let m = lua.create_table()?;
 
     // `SetUnit(unit)` (`0x84f1fc[0]` → `0x505d70`) clears the `SetModel` path; the unit token is
@@ -623,7 +643,7 @@ impl crate::script::UiScript {
         let mut model = self.model_mut();
         let panes: Vec<FrameHandle> = model
             .arena
-            .ticked_kinds()
+            .model_kinds()
             .iter()
             .copied()
             .filter(|&h| {
@@ -654,7 +674,7 @@ impl crate::script::UiScript {
         let model = self.model_ref();
         model
             .arena
-            .ticked_kinds()
+            .model_kinds()
             .iter()
             .filter_map(|&h| {
                 let f = model.arena.frame(h)?;
@@ -666,8 +686,8 @@ impl crate::script::UiScript {
                 };
                 let path = m.path.as_deref()?;
                 let facts = model.model_facts.get(&model_key(path))?;
-                // A pane whose camera is still pending paints nothing, not even its
-                // `OnUpdateModel` (`0x76d5f0`).
+                // A pane whose camera is still pending draws nothing (`0x76d5f0`); its
+                // `OnUpdateModel` still fires, from the paint hook ahead of that gate (`0x76d5ea`).
                 if m.camera_pending.is_some() {
                     return None;
                 }
