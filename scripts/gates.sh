@@ -19,6 +19,8 @@ here="$(cd "$(dirname "$0")/.." && pwd)"
 root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 [ -n "$root" ] && [ -f "$root/scripts/gates.sh" ] || root="$here"
 cd "$root" || exit 1
+# shellcheck source=cargo-env.sh
+. "$root/scripts/cargo-env.sh"
 echo "gating: $root"
 
 # ── Green-stamp memoization ──────────────────────────────────────────────────────────────────────

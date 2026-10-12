@@ -2,7 +2,7 @@
 # The Android build: toolchain, cross-compile, APK, push and launch, in one script.
 #
 #   ./android.sh            menu
-#   ./android.sh 1          JDK, Android SDK, NDK into _work/, the rustup target
+#   ./android.sh 1          JDK into _work/, Android SDK and NDK into ../android-sdk, the rustup target
 #   ./android.sh 2          cargo build of crates/benilla-android for arm64-v8a
 #   ./android.sh 3          _work/out/benilla.apk (NativeActivity, no Java code)
 #   ./android.sh 4          adb install, benilla.env, adb reverse, game data if missing, launch
@@ -16,12 +16,15 @@
 #   ANDROID_SERIAL=<id>                 which device adb talks to
 #   ANDROID_REVERSE=0                   skip `adb reverse` of the server ports
 #
-# Everything downloaded lives in _work/ (gitignored). The game data is the player's own and is
+# Downloads live in _work/ (gitignored), the SDK and NDK in ../android-sdk (ANDROID_HOME overrides
+# it). The game data is the player's own and is
 # copied into the app's internal files folder through `run-as`, never packed into the APK.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")" && pwd)"
 cd "$root"
+# shellcheck source=scripts/cargo-env.sh
+. "$root/scripts/cargo-env.sh"
 work="$root/_work"
 out="$work/out"
 
@@ -40,7 +43,8 @@ PROFILE="${ANDROID_PROFILE:-release}"
 DEVICE_DIR="/data/user/0/$PKG/files"
 STAGE="/data/local/tmp/benilla-stage"
 
-export ANDROID_HOME="${ANDROID_HOME:-$work/android-sdk}"
+# The SDK (and the NDK inside it) sits beside the checkout, shared by every clone.
+export ANDROID_HOME="${ANDROID_HOME:-$(dirname "$root")/android-sdk}"
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
 NDK="${ANDROID_NDK_HOME:-$ANDROID_HOME/ndk/$NDK_VERSION}"
 
@@ -230,6 +234,7 @@ build() {
         features=(--features dev)
     fi
     say "cargo build -p benilla-android --target $TARGET --profile $PROFILE ${features[*]:-}"
+    benilla_prune_incremental
     cargo build -p benilla-android --lib --target "$TARGET" --profile "$PROFILE" ${features[@]+"${features[@]}"}
     say "完成: $(so_path)"
 }
@@ -498,7 +503,7 @@ all() {
 
 usage() {
     echo "用法: ./android.sh [1|2|3|4|5|data]"
-    echo "  1  安装环境（JDK、Android SDK、NDK 到 _work/，Rust 安卓目标）"
+    echo "  1  安装环境（JDK 到 _work/，Android SDK、NDK 到 $ANDROID_HOME，Rust 安卓目标）"
     echo "  2  编译（crates/benilla-android，arm64-v8a）"
     echo "  3  打包 APK（_work/out/benilla.apk）"
     echo "  4  推送到设备并运行（adb install、benilla.env、游戏数据、logcat）"

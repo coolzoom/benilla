@@ -16,6 +16,8 @@ if [ -z "$root" ] || [ ! -f "$root/scripts/smoke.sh" ]; then
     root="$(cd "$(dirname "$0")/.." && pwd)"
 fi
 cd "$root" || exit 1
+# shellcheck source=cargo-env.sh
+. "$root/scripts/cargo-env.sh"
 echo "smoke: $root"
 
 # Resolve the account first, then unset every inherited WOW_* the case below does not keep, so

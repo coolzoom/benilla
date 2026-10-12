@@ -14,6 +14,8 @@ here="$(cd "$(dirname "$0")/.." && pwd)"
 root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 [ -n "$root" ] && [ -f "$root/scripts/check.sh" ] || root="$here"
 cd "$root" || exit 1
+# shellcheck source=cargo-env.sh
+. "$root/scripts/cargo-env.sh"
 
 if [ "${CHECK_FULL:-}" = "1" ]; then
     exec "$root/scripts/gates.sh"

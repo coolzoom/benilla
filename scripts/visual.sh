@@ -12,6 +12,8 @@
 #   scripts/visual.sh selfcheck [<mae>]     # capture twice from one build; demand identical
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=cargo-env.sh
+. scripts/cargo-env.sh
 
 VIS=target/visual
 

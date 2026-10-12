@@ -13,6 +13,8 @@
 # under WOW_NOSOUND `zone::start_music_stream` returns before it logs.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=cargo-env.sh
+. scripts/cargo-env.sh
 
 id=81
 park="-8913,554,94,0"   # Stormwind Trade District: flat, solid, and a zone with music

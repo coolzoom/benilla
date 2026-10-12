@@ -13,6 +13,8 @@ set -uo pipefail
 root="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
 [ -n "$root" ] && [ -f "$root/scripts/summon-live.sh" ] || root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root" || exit 1
+# shellcheck source=cargo-env.sh
+. "$root/scripts/cargo-env.sh"
 echo "summon-live: $root"
 
 # The receiver logs in as this checkout's identity: a login kicks whoever holds the account.

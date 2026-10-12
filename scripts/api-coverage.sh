@@ -11,6 +11,8 @@
 # one, and a global beyond 1.12 sends a feature-detecting addon down a path we cannot honour.
 set -u
 cd "$(dirname "$0")/.."
+# shellcheck source=cargo-env.sh
+. scripts/cargo-env.sh
 
 REF="reference/1.12-globals.tsv"
 [ -f "$REF" ] || { echo "no $REF — run scripts/gen-reference-globals.py" >&2; exit 1; }

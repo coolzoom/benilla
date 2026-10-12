@@ -8,6 +8,8 @@
 # the mechanisms the capture has to tell apart.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=cargo-env.sh
+. scripts/cargo-env.sh
 
 cat <<'BANNER'
 

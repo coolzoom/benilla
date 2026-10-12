@@ -14,4 +14,15 @@ The rest of the root is code and data: `crates/` the workspace, `reference/` the
 catalogues the tests check against, `scripts/` the gates and instruments, `third_party/`
 vendored code.
 
+## Compiling
+
+Desktop builds go through `./dev.sh 2`. Android builds go through `./android.sh 2`.
+Both source `scripts/cargo-env.sh`, which pins `CARGO_TARGET_DIR` to this checkout's
+`target/` and drops incremental caches whose fingerprint will never be reused.
+
+Do not pass `--target-dir`. Do not export `CARGO_TARGET_DIR` or `RUSTFLAGS`. Do not
+run a bare `cargo build`: the dev profile is a second full dependency graph, and
+Cursor's sandbox points `CARGO_TARGET_DIR` at a new directory, so each of those
+builds is another ~10 GB copy left on disk.
+
 @docs/METHOD.md

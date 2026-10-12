@@ -12,6 +12,8 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")" && pwd)"
 cd "$root"
+# shellcheck source=scripts/cargo-env.sh
+. "$root/scripts/cargo-env.sh"
 local_env="$root/.benilla.local"
 
 if [ -f "$HOME/.cargo/env" ]; then
@@ -289,6 +291,7 @@ build_client() {
     echo "== 2 编译 =="
     require_rust || return 1
     echo "cargo build --profile play -p benilla"
+    benilla_prune_incremental
     cargo build --profile play -p benilla || return 1
     echo "编译完成: target/play/benilla"
 }

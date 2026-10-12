@@ -1,5 +1,9 @@
 # `cargo play` — the run loop. Same optimization as `--release`, plus incremental compilation (see
 # `[profile.play]` in the workspace Cargo.toml for why it is a separate profile and not a flip of
 # `release`). Env vars still prefix it: `WOW_USER=<account> WOW_PASS=<password> cargo play`.
+#
+# Output stays in this checkout's target/. Do not set CARGO_TARGET_DIR: Cargo lets that
+# variable override this file, and a per-run directory is a full extra copy of the graph.
+# scripts/cargo-env.sh pins the variable for the repo's own scripts.
 [alias]
 play = "run --profile play -p benilla"
