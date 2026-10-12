@@ -9,6 +9,8 @@
 #   ./android.sh 5          1 to 4
 #   ./android.sh data       adb push the WoW Data folder (several GB) on its own
 #   ./android.sh install    and `run`: the two halves of 4
+#   ./android.sh xapk       _work/out/benilla.xapk: the APK and every Data MPQ, for a phone's XAPK installer
+#   ./android.sh xapk-install [file]   install an XAPK over adb, as an XAPK installer does
 #
 # Switches (environment):
 #   ANDROID_PROFILE=release|ship|play   cargo profile (default release)
@@ -17,8 +19,8 @@
 #   ANDROID_REVERSE=0                   skip `adb reverse` of the server ports
 #
 # Downloads live in _work/ (gitignored), the SDK and NDK in ../android-sdk (ANDROID_HOME overrides
-# it). The game data is the player's own and is
-# copied into the app's internal files folder through `run-as`, never packed into the APK.
+# it). The game data is the player's own: `data` copies it into the app's internal files folder
+# through `run-as`, and `xapk` packs it beside the APK, never into it.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")" && pwd)"
@@ -324,6 +326,93 @@ package() {
     say "APK: $apk ($(du -h "$apk" | cut -f1))"
 }
 
+# ── xapk ────────────────────────────────────────────────────────────────────────────────────────
+
+# An APK can carry no 5 GB of MPQs (Android reads no zip64 APK), so the bundle is an XAPK: the APK
+# plus the Data MPQs as expansion files, which an XAPK installer copies into
+# Android/obb/$PKG/. benilla-android reads them there when the app's own WoW/Data is empty.
+OBB_DIR="Android/obb/$PKG"
+
+# The MPQs of a vanilla Data folder, as `Chain::open` mounts them: top-level `*.MPQ`, any case.
+data_mpqs() {
+    find "$1" -maxdepth 1 -type f -iname '*.mpq' -exec basename {} \; | sort
+}
+
+write_xapk_manifest() {
+    local f="$1" data="$2" version size name first=1
+    version="$(awk -F'"' '/^version *=/ {print $2; exit}' "$root/Cargo.toml")"
+    size="$(du -sk "$out/benilla.apk" | cut -f1)"
+    {
+        echo '{'
+        echo '  "xapk_version": 2,'
+        echo "  \"package_name\": \"$PKG\","
+        echo '  "name": "benilla",'
+        echo '  "version_code": "1",'
+        echo "  \"version_name\": \"$version\","
+        echo "  \"min_sdk_version\": \"$API\","
+        echo "  \"target_sdk_version\": \"$SDK_PLATFORM\","
+        echo '  "permissions": ["android.permission.INTERNET", "android.permission.ACCESS_NETWORK_STATE"],'
+        echo "  \"split_apks\": [{\"file\": \"$PKG.apk\", \"id\": \"base\"}],"
+        echo '  "expansions": ['
+        while read -r name; do
+            size=$((size + $(du -sk "$data/$name" | cut -f1)))
+            [ "$first" = 1 ] || echo ','
+            first=0
+            printf '    {"file": "%s/%s", "install_location": "EXTERNAL_STORAGE", "install_path": "%s/%s"}' \
+                "$OBB_DIR" "$name" "$OBB_DIR" "$name"
+        done < <(data_mpqs "$data")
+        echo
+        echo '  ],'
+        echo "  \"total_size\": $((size * 1024))"
+        echo '}'
+    } >"$f"
+}
+
+# _work/out/benilla.xapk: APK, manifest.json and every MPQ, stored (MPQs compress no further).
+xapk() {
+    local data stage pkg_apk n
+    data="$(local_data_dir)"
+    n="$(data_mpqs "$data" | wc -l | tr -d ' ')"
+    [ "$n" -gt 0 ] || die "$data 里没有 MPQ"
+    # One step from source: the build is incremental, so an up-to-date tree only repackages.
+    build
+    package
+    stage="$work/xapk"
+    pkg_apk="$PKG.apk"
+    rm -rf "$stage" && mkdir -p "$stage/$OBB_DIR"
+    # Symlinks, so 5 GB is not copied twice; zip stores what they point at.
+    ln -s "$out/benilla.apk" "$stage/$pkg_apk"
+    while read -r name; do ln -s "$data/$name" "$stage/$OBB_DIR/$name"; done < <(data_mpqs "$data")
+    write_xapk_manifest "$stage/manifest.json" "$data"
+    rm -f "$out/benilla.xapk"
+    say "打包 $n 个 MPQ（$(du -shL "$stage/$OBB_DIR" | cut -f1)）-> $out/benilla.xapk"
+    (cd "$stage" && zip -q -0 -r "$out/benilla.xapk" manifest.json "$pkg_apk" Android)
+    unzip -tq "$out/benilla.xapk" >/dev/null || die "benilla.xapk 校验失败"
+    rm -rf "$stage"
+    say "XAPK: $out/benilla.xapk ($(du -h "$out/benilla.xapk" | cut -f1))"
+    say "手机上用 XAPK 安装器（APKPure、XAPK Installer 等）打开即可安装；或电脑上 ./android.sh xapk-install"
+}
+
+# Install an XAPK the way an XAPK installer does: the APK, then each expansion into the OBB folder.
+xapk_install() {
+    require_device
+    local file="${1:-$out/benilla.xapk}" tmp
+    [ -f "$file" ] || die "没有 ${file}（先运行 ./android.sh xapk）"
+    tmp="$work/xapk-install"
+    rm -rf "$tmp" && mkdir -p "$tmp"
+    unzip -q "$file" -d "$tmp"
+    say "adb install $PKG.apk"
+    adb_ install -r -d "$tmp/$PKG.apk"
+    adb_ shell mkdir -p "/sdcard/$OBB_DIR"
+    local f
+    for f in "$tmp/$OBB_DIR"/*; do
+        say "adb push $(basename "$f") -> /sdcard/$OBB_DIR/"
+        adb_ push "$f" "/sdcard/$OBB_DIR/" >/dev/null
+    done
+    rm -rf "$tmp"
+    say "已安装 $file"
+}
+
 # ── device ──────────────────────────────────────────────────────────────────────────────────────
 
 adb_() {
@@ -511,6 +600,8 @@ usage() {
     echo "  4  推送到设备并运行（adb install、benilla.env、游戏数据、logcat）"
     echo "  5  全部（1 到 4）"
     echo "  data  只推送游戏数据"
+    echo "  xapk  打包含全部游戏数据的 XAPK（_work/out/benilla.xapk），手机上用 XAPK 安装器安装"
+    echo "  xapk-install [文件]  通过 adb 安装 XAPK"
     echo "环境变量: ANDROID_PROFILE=release|ship|play  ANDROID_DEV=0  ANDROID_SERIAL=<id>  ANDROID_REVERSE=0"
 }
 
@@ -543,6 +634,8 @@ case "${1:-}" in
 5 | all) all ;;
 install) install_apk ;;
 data) push_data ;;
+xapk) xapk ;;
+xapk-install) xapk_install "${2:-}" ;;
 run) run_app ;;
 -h | --help) usage ;;
 "")

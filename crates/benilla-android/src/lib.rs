@@ -24,9 +24,10 @@ fn android_main(app: AndroidApp) {
     let files = app
         .internal_data_path()
         .or_else(|| app.external_data_path());
+    let obb = app.obb_path();
     let _ = bevy::android::ANDROID_APP.set(app);
     match files {
-        Some(dir) => configure(&dir),
+        Some(dir) => configure(&dir, obb.as_deref()),
         None => eprintln!("android: the app has no files folder; running with no install"),
     }
     let exit = benilla_app::run(BuildId {
@@ -48,9 +49,22 @@ fn android_main(app: AndroidApp) {
     });
 }
 
-/// Sets `benilla.env`'s variables, then `WOW_DATA` and `BENILLA_HOME` under `dir` unless the file
-/// named them. Runs before the app spawns a thread, so the environment writes race nothing.
-fn configure(dir: &Path) {
+/// Whether `dir` holds a vanilla `Data` set, by the test `android.sh` uses: a `patch.MPQ` or a
+/// `terrain.MPQ`, any case.
+fn has_data(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries.flatten().any(|e| {
+            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+            name == "patch.mpq" || name == "terrain.mpq"
+        })
+    })
+}
+
+/// Sets `benilla.env`'s variables, then `WOW_DATA` and `BENILLA_HOME` unless the file named
+/// them. `WOW_DATA` is `WoW/Data` under `dir` when `android.sh data` filled it, else the OBB
+/// folder an XAPK installer fills with the MPQs (`android.sh xapk`). Runs before the app spawns
+/// a thread, so the environment writes race nothing.
+fn configure(dir: &Path, obb: Option<&Path>) {
     let env_file = dir.join("benilla.env");
     if let Ok(text) = std::fs::read_to_string(&env_file) {
         for line in text.lines().map(str::trim) {
@@ -63,8 +77,23 @@ fn configure(dir: &Path) {
         }
         println!("android: read {}", env_file.display());
     }
+    // An emulator's goldfish Vulkan encoder hangs under concurrent calls and stalls the first
+    // frames (benilla_world::boot), so an emulator defaults to serial GPU work over GLES, as
+    // `android.sh install` writes it; an XAPK install writes no `benilla.env`.
+    if Path::new("/system/lib64/libvulkan_enc.so").exists() {
+        for (key, value) in [("WOW_GPU_SERIAL", "1"), ("WGPU_BACKEND", "gl")] {
+            if std::env::var_os(key).is_none() {
+                std::env::set_var(key, value);
+            }
+        }
+    }
+    let pushed = dir.join("WoW").join("Data");
+    let data = match obb {
+        Some(obb) if !has_data(&pushed) && has_data(obb) => obb.to_path_buf(),
+        _ => pushed,
+    };
     let defaults = [
-        ("WOW_DATA", dir.join("WoW").join("Data")),
+        ("WOW_DATA", data),
         ("BENILLA_HOME", dir.join("benilla-config")),
     ];
     for (key, path) in defaults {
