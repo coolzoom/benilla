@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! /data/user/0/org.benilla.client/files/
-//!   benilla.env       WOW_HOST=…, WOW_USER=…, one KEY=VALUE per line
+//!   benilla.env       WOW_USER=…, WOW_NOSOUND=…, one KEY=VALUE per line
 //!   WoW/Data/         the player's own 1.12.1 Data, read-only
 //!   benilla-config/   benilla's local state
 //! ```

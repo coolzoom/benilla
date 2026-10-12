@@ -362,9 +362,9 @@ write_device_env() {
     local f="$1"
     {
         echo "# benilla.env: read by the Android launcher at startup, KEY=VALUE per line."
-        # A set `WOW_HOST` fixes the realmlist for the session; unset, the login screen's
-        # realmlist editor takes an address, as the desktop client's does.
-        [ -n "${WOW_HOST:-}" ] && echo "WOW_HOST=$WOW_HOST"
+        # No `WOW_HOST`: it would fix the realmlist for the session, and the player types the
+        # server into the login screen's realmlist editor. `WOW_HOST` here only picks the
+        # ports `adb reverse` forwards.
         [ -n "${WOW_USER:-}" ] && echo "WOW_USER=$WOW_USER"
         [ -n "${WOW_PASS:-}" ] && echo "WOW_PASS=$WOW_PASS"
         [ -n "${WOW_CHAR:-}" ] && echo "WOW_CHAR=$WOW_CHAR"
@@ -408,7 +408,7 @@ install_apk() {
     adb_ install -r -d "$apk"
     write_device_env "$work/benilla.env"
     stage_in "$work/benilla.env" "$DEVICE_DIR/benilla.env"
-    say "已写入 $DEVICE_DIR/benilla.env（服务器 ${WOW_HOST:-登录界面输入，默认 localhost:3724}）"
+    say "已写入 $DEVICE_DIR/benilla.env（服务器地址在登录界面填写）"
     reverse_ports
 }
 
