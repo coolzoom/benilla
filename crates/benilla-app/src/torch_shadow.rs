@@ -2084,7 +2084,10 @@ mod tests {
             slot.monkey_track_motion(12.5);
             assert!(slot.moving(12.5));
             slot.monkey_track_motion(13.0);
-            assert!(!slot.moving(13.0), "a stationary fixture returns to the cache");
+            assert!(
+                !slot.moving(13.0),
+                "a stationary fixture returns to the cache"
+            );
         }
     }
 

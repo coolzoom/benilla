@@ -74,7 +74,8 @@ fn harness_with_slider_table(
     super::manifest::apply_buff_durations(&s).unwrap();
     // The rows' tips take `GameTooltip_SetDefaultAnchor`, which reads the bag offsets
     // `ContainerFrame.lua:11-12` declares; the stock 0 and 70, as no bag is open.
-    s.run("CONTAINER_OFFSET_X = 0 CONTAINER_OFFSET_Y = 70").unwrap();
+    s.run("CONTAINER_OFFSET_X = 0 CONTAINER_OFFSET_Y = 70")
+        .unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s
 }

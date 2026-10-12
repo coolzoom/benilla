@@ -376,7 +376,7 @@ fn query(
 ) -> bool {
     let mut ok = logon.refresh_realms(REALM_REFRESH_TIMEOUT);
     if !ok {
-        match benilla_protocol::logon(&req.host, &req.user, &req.pass) {
+        match benilla_protocol::logon_as_build(&req.host, &req.user, &req.pass, login_build()) {
             Ok(fresh) => {
                 *logon = fresh;
                 ok = true;
@@ -477,7 +477,12 @@ fn run(
 
         // Logon: the dial and the SRP6 exchange against realmd.
         stage(LoginStage::Connecting);
-        let mut logon = match benilla_protocol::logon(&req.host, &req.user, &req.pass) {
+        let mut logon = match benilla_protocol::logon_as_build(
+            &req.host,
+            &req.user,
+            &req.pass,
+            login_build(),
+        ) {
             Ok(l) => l,
             Err(e) => {
                 if canceled() {
@@ -599,54 +604,7 @@ fn world(
             terminal: true,
             dial: None,
         });
-    // ── The realm park ─────────────────────────────────────────────────────────────────────────
-    //
-    // The login-side list: `RealmList` is a `frameStrata="DIALOG"` frame over the current glue
-    // screen and `RealmList_OnCancel` only hides it, so Cancel here returns to the login screen.
-    // Change Realm is served at the character park. A server with no realms skips the park and
-    // dials the fallback address.
-    let mut realm = if logon.realms.is_empty() {
-        None
-    } else {
-        // An answer queued during a dead cycle must not answer this list.
-        while realm_rx.try_recv().is_ok() {}
-        loop {
-            if events_tx
-                .send(SessionEvent::RealmList {
-                    realms: logon.realms.clone(),
-                })
-                .is_err()
-            {
-                return Ok(Cycle::Exit);
-            }
-            bevy::log::info!(
-                "net: parked at the realm list — {} realm(s) published",
-                logon.realms.len()
-            );
-            let Ok(req) = realm_rx.recv() else {
-                return Ok(Cycle::Exit);
-            };
-            if canceled() {
-                return Ok(Cycle::Repark);
-            }
-            match req {
-                // Cancel over the login screen.
-                RealmRequest::Abandon => return Ok(Cycle::Repark),
-                // The reference re-requests the list every 5 s while it is up; a failed refresh
-                // keeps the list on screen (`Logon::refresh_realms`).
-                RealmRequest::Refresh => {
-                    logon.refresh_realms(REALM_REFRESH_TIMEOUT);
-                }
-                // By name, so a list that changed under the click cannot enter the wrong realm;
-                // a vanished name re-publishes the list.
-                RealmRequest::Enter(name) => {
-                    if let Some(realm) = logon.realms.iter().find(|r| r.name == name) {
-                        break Some(realm.clone());
-                    }
-                }
-            }
-        }
-    };
+        Ok(WorldEnd::Failed)
     };
 
     // ── The world half, once per realm ─────────────────────────────────────────────────────────
@@ -1906,9 +1864,6 @@ fn login_build() -> u16 {
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(benilla_protocol::CLIENT_BUILD)
 }
-
-#[cfg(test)]
-mod cycle_tests;
 
 #[cfg(test)]
 mod cycle_tests;

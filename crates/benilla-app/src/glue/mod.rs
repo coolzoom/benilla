@@ -50,7 +50,10 @@ impl Plugin for GluePlugin {
             .init_resource::<GlueArt>()
             .add_systems(
                 Startup,
-                (crate::glue_strings::load_glue_strings, register_locale_fonts)
+                (
+                    crate::glue_strings::load_glue_strings,
+                    register_locale_fonts,
+                )
                     .after(benilla_assets::AssetSet::Open),
             )
             .init_resource::<GlueClicks>()

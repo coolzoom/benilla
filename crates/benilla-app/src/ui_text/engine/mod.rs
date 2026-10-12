@@ -33,8 +33,8 @@ use cosmic_text::{
 
 use benilla_assets::{LockRecover, WorldAssets};
 
-use faces::{hhea_ascent_ratio, register_font, CLIENT_FONTS};
 pub(crate) use faces::LOCALE_FONTS;
+use faces::{hhea_ascent_ratio, register_font, CLIENT_FONTS};
 pub(crate) use gpu::UiTextPlugin;
 
 use super::outline::outlined_cell;
@@ -393,7 +393,6 @@ impl TextEngine {
                 break;
             }
             glyphs.clear();
-            floor_sum = 0.0;
             shaped_by = None;
             let attrs = Attrs::new()
                 .family(Family::Name(&family))
