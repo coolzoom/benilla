@@ -20,6 +20,7 @@ Upstream benilla tracks the 1.12.1 client exactly, so changes that go beyond it 
 2. **[Enhanced graphics](#enhanced-graphics)**: an optional modern look (shadows, modern fog, volumetric light, water, weather) and HD assets.
 3. **[Gameplay features](#gameplay-features)**: modern quality of life the 1.12 client never had.
 4. **[DLSS 5 Neural Rendering](#dlss-5-neural-rendering-experimental)** *(experimental)*: NVIDIA's neural renderer applied to the world, on RTX cards.
+5. **[iOS (iNilla)](#ios-inilla)**: the same client on iPhone, with touch controls, controllers and a launcher.
 
 
 Everything else (formats, networking, the stock interface, addons, audio) is upstream benilla, merged in
@@ -120,6 +121,13 @@ the default dev build; a `--no-default-features` player build leaves it out).
 **Known limitations**
 - The parameters for Feature 18 are not in NVIDIA's public SDK, so the tuning values are our own.
 - Foliage motion vectors leave out wind sway, which can show as smearing on swaying trees and grass.
+
+## iOS (iNilla)
+
+The iPhone build is iNilla: touch controls, MFi controllers, a launcher with server profiles, and
+game-data download. It sideloads on iOS 17 or newer. Building the `.ipa` and the on-device setup
+are in [docs/IOS-BUILD.md](docs/IOS-BUILD.md); the controls and settings are in
+[docs/INILLA.md](docs/INILLA.md).
 
 ## Licence
 

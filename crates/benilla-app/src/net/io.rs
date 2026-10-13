@@ -625,7 +625,9 @@ fn world(
             realm.address,
             logon.realms.len()
         );
-        let world_addr = realm.address.clone();
+        // iNilla: the active server profile may name the host to dial instead (the realm list's
+        // address is often only right from one side of a NAT).
+        let world_addr = crate::inilla::world_address(realm.address.clone());
 
         stage(LoginStage::Handshaking);
         // For the queue dialog to name; the roster that carries it comes after the queue.
