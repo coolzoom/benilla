@@ -91,6 +91,20 @@ cargo check --target aarch64-apple-ios -p inilla-ios
   have; the app runs either way) and `get-task-allow`.
 - **Signing**: ad-hoc. SideStore, AltStore and LiveContainer re-sign.
 
+## Installing SideStore
+
+`ios/sidestore.sh` downloads iloader — the one installer repository SideStore's own documentation
+names — verifies the sha256 GitHub publishes for the release asset, and opens it. The Apple Account
+password and the 2FA code go into iloader's window; the script neither reads nor stores them.
+
+```sh
+ios/sidestore.sh          # download and open iloader, then print the phone steps
+ios/sidestore.sh ipa      # how an .ipa goes in once SideStore is on the phone
+```
+
+iloader is an unsigned app from the internet, so macOS quarantines it: the script's own `xattr`
+step clears that, which is why it prints what it removed.
+
 ## Installing
 
 **SideStore (free Apple ID).** Apps signed with a free account expire after **7 days**; refresh them
