@@ -323,8 +323,12 @@ package() {
         -I "$ANDROID_HOME/platforms/android-$SDK_PLATFORM/android.jar"
     (cd "$stage" && zip -q -r base.apk lib)
     "$bt/zipalign" -f -p 4 "$stage/base.apk" "$stage/aligned.apk"
+    # No v4 signature: the `.idsig` it writes beside the APK is for incremental install, nothing
+    # in this flow installs or ships one, and it would sit in `_work/out` as a stale twin.
     "$bt/apksigner" sign --ks "$(debug_keystore)" --ks-pass pass:android \
-        --key-pass pass:android --out "$apk" "$stage/aligned.apk"
+        --key-pass pass:android --v4-signing-enabled false --out "$apk" "$stage/aligned.apk"
+    # The staging tree is 228 MB (two copies of the APK and the stripped `.so`); the APK is out.
+    rm -rf "$stage"
     say "APK: $apk ($(du -h "$apk" | cut -f1))"
 }
 
@@ -335,9 +339,11 @@ package() {
 # Android/obb/$PKG/. benilla-android reads them there when the app's own WoW/Data is empty.
 OBB_DIR="Android/obb/$PKG"
 
-# The MPQs of a vanilla Data folder, as `Chain::open` mounts them: top-level `*.MPQ`, any case.
+# The MPQs of a vanilla Data folder, as `Chain::open` mounts them. `inilla-core::data` owns that
+# rule; this asks it rather than globbing, because a bare `*.mpq` picks up `base.MPQ` and
+# `backup.MPQ`, which the chain never opens — 21 MB the player would carry for nothing.
 data_mpqs() {
-    find "$1" -maxdepth 1 -type f -iname '*.mpq' -exec basename {} \; | sort
+    cargo run -q -p inilla-core --example data-list -- "$1"
 }
 
 write_xapk_manifest() {
@@ -553,6 +559,7 @@ push_data() {
 
 run_app() {
     require_device
+    # `install_apk` reversed the ports on the way in; reversing again only reprints the mapping.
     reverse_ports
     adb_ shell am force-stop "$PKG" || true
     adb_ logcat -c || true

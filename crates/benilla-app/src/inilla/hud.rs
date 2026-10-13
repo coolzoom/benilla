@@ -110,7 +110,13 @@ fn draw(
     let in_world = *client.get() == ClientState::InWorld;
 
     // ── the touch HUD ──
-    if hud_visible(&inilla, client.get(), &overlay, pad_active, touch.layer_touch) {
+    if hud_visible(
+        &inilla,
+        client.get(),
+        &overlay,
+        pad_active,
+        touch.layer_touch,
+    ) {
         let layout = &inilla.layout;
         let base = layout.opacity;
         for (i, el) in layout.shown() {

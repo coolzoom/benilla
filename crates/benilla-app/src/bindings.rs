@@ -230,11 +230,7 @@ impl BindingsState {
 
     /// Assert a held command for this frame. Idempotent: a command already latched
     /// (synthetically or by a key) gains nothing.
-    pub(crate) fn synth_hold(
-        &mut self,
-        script: &mut Option<NonSendMut<UiScript>>,
-        command: &str,
-    ) {
+    pub(crate) fn synth_hold(&mut self, script: &mut Option<NonSendMut<UiScript>>, command: &str) {
         let key = Held::Synth(command.to_owned());
         if self.latched.iter().any(|(k, _)| *k == key) {
             return;
@@ -740,7 +736,11 @@ pub(crate) fn press(
 
 /// A base key's release: drop its latch and run the command's `runOnUp` up-half, even while
 /// typing (the reference completes a pressed binding's release regardless of focus).
-pub(crate) fn release(state: &mut BindingsState, script: &mut Option<NonSendMut<UiScript>>, key: Held) {
+pub(crate) fn release(
+    state: &mut BindingsState,
+    script: &mut Option<NonSendMut<UiScript>>,
+    key: Held,
+) {
     let mut i = 0;
     while i < state.latched.len() {
         if state.latched[i].0 == key {

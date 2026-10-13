@@ -489,7 +489,9 @@ impl M2BatchMaterials<'_> {
     ) -> Handle<WowModelMaterial> {
         // Entity batches share one material per batch: an entity resolves its sequence through
         // `MatAnim::host`, so only the world streamer keys one per placement.
-        self.build_for(sub, texture, order, shade, probe, fade, play_uv, light, torch, None)
+        self.build_for(
+            sub, texture, order, shade, probe, fade, play_uv, light, torch, None,
+        )
     }
 
     /// [`Self::build`], keyed to `instance` when the material belongs to one.

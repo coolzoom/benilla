@@ -199,7 +199,20 @@ fn process(
     // The HUD yields to a controller in use, and comes back with the next touch.
     let pad_active = pad.active(now) && pad.last_active > state.last_touch;
     state.layer_touch = layer_touch(&cvars);
-    let show = hud_visible(&inilla, client.get(), &overlay, pad_active, state.layer_touch);
+    let show = hud_visible(
+        &inilla,
+        client.get(),
+        &overlay,
+        pad_active,
+        state.layer_touch,
+    );
+    // The layer owns every finger while it is live, mouse included: `crate::touch_mouse` feeds the
+    // engine, and a second feed here would press every button twice.
+    if state.layer_touch {
+        touches.clear();
+        reset(state, vm);
+        return;
+    }
     let blocked = overlay.blocks_game();
 
     // "Is a mouse-enabled FrameXML frame under this point?" — the input pass's own conversion

@@ -1,8 +1,8 @@
-//! Android: winit reports every pointer as a touch, a mouse included, and never moves the window's
-//! cursor. The client is mouse-driven: a glue button clicks on `Interaction` `Pressed → Hovered`
-//! (`glue::glue_clicks`), which a lifted finger, leaving no cursor to hover, never reaches. One
-//! finger is replayed as the left button and the cursor, and stays where it lifted, as a mouse
-//! does.
+//! Touch devices: winit reports every pointer as a touch, a mouse included, and never moves the
+//! window's cursor. The client is mouse-driven: a glue button clicks on `Interaction`
+//! `Pressed → Hovered` (`glue::glue_clicks`), which a lifted finger, leaving no cursor to hover,
+//! never reaches. One finger is replayed as the left button and the cursor, and stays where it
+//! lifted, as a mouse does.
 //!
 //! With the touch interface up (`mobileInterface`, `MobileInterface.xml`) every finger is routed
 //! where it lands: the stick (`BenillaMobileStick`) holds the four directions its drag points at,
@@ -29,11 +29,36 @@ pub(crate) struct TouchMousePlugin;
 impl Plugin for TouchMousePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TouchLook>()
-            .add_systems(PreUpdate, touch_to_mouse.before(InputSystems))
+            .add_systems(
+                PreUpdate,
+                touch_to_mouse.before(InputSystems).run_if(touch_owns),
+            )
             // After the accumulator, which would overwrite the world drag's motion.
-            .add_systems(PreUpdate, add_touch_look.after(InputSystems))
-            .add_systems(PostUpdate, clear_cursor);
+            .add_systems(
+                PreUpdate,
+                add_touch_look.after(InputSystems).run_if(touch_owns),
+            )
+            .add_systems(PostUpdate, clear_cursor.run_if(touch_owns));
     }
+}
+
+/// Is the FrameXML touch layer the live interface? Only on a touch device, and only while its CVar
+/// is on. The same predicate stands iNilla's egui HUD down (`inilla::touch::layer_touch`), so
+/// whichever of the two is live owns every finger.
+fn layer_up(script: Option<NonSend<UiScript>>, cvars: Option<Res<crate::cvars::Cvars>>) -> bool {
+    crate::inilla::touch_device()
+        && cvars.is_some_and(|c| c.flag("mobileInterface").unwrap_or(false))
+        && script.is_some_and(|s| s.frame_visible("BenillaMobileHud"))
+}
+
+/// Whether this module speaks for the pointer at all: on Android, which has no touch stack of its
+/// own, or on any touch device while the layer is the live interface. Off a touch screen the window
+/// has a real cursor, and the clearing below would take the player's mouse away.
+///
+/// The two never both replay a finger: iNilla's own handler feeds the engine only while the layer
+/// is down (`inilla::touch::hud_visible` returns false on the same reading).
+fn touch_owns(script: Option<NonSend<UiScript>>, cvars: Option<Res<crate::cvars::Cvars>>) -> bool {
+    cfg!(target_os = "android") || layer_up(script, cvars)
 }
 
 /// The stick's reach in root units, and the drag under which it holds nothing.
@@ -116,7 +141,9 @@ fn touch_to_mouse(
     if std::mem::take(&mut pointer.release_next) {
         buttons.write(button(ButtonState::Released));
     }
-    // The interface's regions, off the rects the last tick resolved; none in the stock layout.
+    // The interface's regions, off the rects the last tick resolved. Away from them — the glue
+    // screens, the stock layout — every finger is the mouse, which is the whole of what the PC
+    // layout on a phone needs: the stock buttons are click targets.
     let regions = script
         .as_ref()
         .filter(|s| s.frame_visible("BenillaMobileHud"))
@@ -153,8 +180,7 @@ fn touch_to_mouse(
                 Some(_)
                     if pointer.finger.is_some()
                         || script.as_ref().is_some_and(|s| {
-                            s.hit_test(ui.x, ui.y)
-                                .is_none_or(|id| s.is_world_frame(id))
+                            s.hit_test(ui.x, ui.y).is_none_or(|id| s.is_world_frame(id))
                         }) =>
                 {
                     Role::Look
@@ -257,7 +283,11 @@ fn touch_to_mouse(
     if looking != pointer.looking {
         pointer.looking = looking;
         if let Some(s) = script.as_ref() {
-            let _ = s.run(if looking { "MouselookStart()" } else { "MouselookStop()" });
+            let _ = s.run(if looking {
+                "MouselookStart()"
+            } else {
+                "MouselookStop()"
+            });
         }
     }
     motion.0 += look;
@@ -303,7 +333,10 @@ mod tests {
 
     #[test]
     fn the_stick_holds_what_its_drag_points_at() {
-        assert!(stick_dirs(Vec2::new(5.0, 10.0)).is_empty(), "inside the dead zone");
+        assert!(
+            stick_dirs(Vec2::new(5.0, 10.0)).is_empty(),
+            "inside the dead zone"
+        );
         assert_eq!(stick_dirs(Vec2::new(0.0, 80.0)), vec![Input::MoveForward]);
         assert_eq!(
             stick_dirs(Vec2::new(-60.0, -60.0)),

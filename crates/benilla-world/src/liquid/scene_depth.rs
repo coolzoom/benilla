@@ -41,7 +41,8 @@ impl Plugin for WaterDepthPlugin {
         app.init_resource::<WaterQuality>()
             .init_resource::<WaterDepthImage>()
             .init_resource::<WaterColourImage>();
-        let value = std::env::var("WOW_WATER").ok()
+        let value = std::env::var("WOW_WATER")
+            .ok()
             .and_then(|v| v.parse::<u8>().ok())
             .filter(|v| *v <= 2);
         // The enhanced water reads the depth this pass copies, and the pass cannot run on GL.
@@ -66,8 +67,13 @@ impl Plugin for WaterDepthPlugin {
         let shader = app
             .world_mut()
             .resource_mut::<Assets<Shader>>()
-            .add(Shader::from_wgsl(RESOLVE_SHADER, "water_depth_resolve.wgsl"));
-        if crate::gl_backend() { return; }
+            .add(Shader::from_wgsl(
+                RESOLVE_SHADER,
+                "water_depth_resolve.wgsl",
+            ));
+        if crate::gl_backend() {
+            return;
+        }
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };

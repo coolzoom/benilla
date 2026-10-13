@@ -1125,6 +1125,8 @@ fn the_stock_layout_gets_only_the_switch() {
     assert!(s.eval::<bool>("return BenillaMobileToggle ~= nil").unwrap());
     assert!(s.eval::<bool>("return BenillaMobileHud == nil").unwrap());
     assert!(s
-        .eval::<bool>("return MainMenuBar:GetParent() ~= nil and MainMenuBar:GetParent() == UIParent")
+        .eval::<bool>(
+            "return MainMenuBar:GetParent() ~= nil and MainMenuBar:GetParent() == UIParent"
+        )
         .unwrap());
 }

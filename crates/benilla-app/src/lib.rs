@@ -134,7 +134,6 @@ mod text_reshape;
 mod textinput;
 mod torch_shadow;
 
-#[cfg(target_os = "android")]
 mod touch_mouse;
 mod transport;
 mod tutorial;
@@ -502,7 +501,6 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
         }
     }
 
-    #[cfg(target_os = "android")]
     app.add_plugins(touch_mouse::TouchMousePlugin);
 
     // A crate on top of benilla adds its plugins here ([`run_with`]).
