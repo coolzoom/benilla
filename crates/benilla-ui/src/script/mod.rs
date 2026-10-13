@@ -952,6 +952,17 @@ impl UiScript {
             .any(|(_, f)| f.name.as_deref() == Some(name) && f.effective_visible)
     }
 
+    /// The resolved rect (root units, y up) of the shown frame with this global name, for the
+    /// app's touch controls, which hit their own regions before the pointer feed.
+    pub fn frame_rect(&self, name: &str) -> Option<Rect> {
+        let model = self.model_ref();
+        let (h, _) = model
+            .arena
+            .iter_frames()
+            .find(|(_, f)| f.name.as_deref() == Some(name) && f.effective_visible)?;
+        model.resolved.get(&h).copied()
+    }
+
     /// Whether frame `h` is shown with every ancestor; false for a stale handle.
     pub fn frame_visible_at(&self, h: crate::widget::FrameHandle) -> bool {
         self.model_ref()

@@ -1079,3 +1079,52 @@ fn escape_clears_the_detail_boxs_focus() {
     assert!(!s.has_keyboard_focus(), "Escape let go of the keyboard");
     assert_eq!(detail_text(&s), msg);
 }
+
+/// With `mobileInterface` at 1 the touch interface builds whole: its stick, wheel and rings over
+/// the stock bars, which go under the hidden parent, and its switch back to the stock layout.
+#[test]
+fn the_touch_interface_loads_and_hides_the_stock_bars() {
+    benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let before = "SetCVar(\"mobileInterface\", \"1\")";
+    let (mut s, failures) = production_load_with("mobile", false, before, |_| {});
+    assert!(failures.is_empty(), "load failures: {failures:#?}");
+    // The world entry arranges the stock frames and paints the rings: no script error either.
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    s.run("BenillaMobileStick_SetKnob(40, -30)").unwrap();
+    assert!(s.errors().is_empty(), "errors: {:#?}", s.errors());
+    for name in [
+        "BenillaMobileHud",
+        "BenillaMobileStick",
+        "BenillaMobileJump",
+        "BenillaMobileActionButton6",
+        "BenillaMobilePlayerRing",
+        "BenillaMobileToggle",
+    ] {
+        assert!(
+            s.eval::<bool>(&format!("return {name} ~= nil")).unwrap(),
+            "{name}"
+        );
+    }
+    assert!(s
+        .eval::<bool>("return MainMenuBar:GetParent() == BenillaMobileHiddenParent")
+        .unwrap());
+}
+
+/// At the stock default the layout is untouched: the switch alone, and no HUD.
+#[test]
+fn the_stock_layout_gets_only_the_switch() {
+    benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (s, failures) = production_load_with("pc", false, "", |_| {});
+    assert!(failures.is_empty(), "load failures: {failures:#?}");
+    assert!(s.eval::<bool>("return BenillaMobileToggle ~= nil").unwrap());
+    assert!(s.eval::<bool>("return BenillaMobileHud == nil").unwrap());
+    assert!(s
+        .eval::<bool>("return MainMenuBar:GetParent() ~= nil and MainMenuBar:GetParent() == UIParent")
+        .unwrap());
+}

@@ -542,6 +542,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
          / Ultra, or Custom when the rows match none of them; the reference's options have no \
          such preset",
     ),
+    // The touch interface (`MobileInterface.xml`, `touch_mouse`): a stick, an action wheel and
+    // portrait rings in place of the stock bars. On by default where the screen is a touch one.
+    ours(
+        "mobileInterface",
+        if cfg!(target_os = "android") { "1" } else { "0" },
+        "benilla's own: the touch interface, 0 the stock (PC) layout / 1 the mobile HUD; 1.12 \
+         has no touch input",
+    ),
     // MONKEY (volumetric fog): saved live tier; capture override stays session-only.
     ours("volumetricFog", "1", "benilla's own: near-field volumetric fog, 0 Off / 1 Low / 2 High"),
     // MONKEY (lampfog): opt-in point-light halos; High graphics preset value is 2.

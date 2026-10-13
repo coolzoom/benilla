@@ -21,3 +21,5 @@ SpellBookAdapters.xml
 ScriptLogFrame.xml
 # Our fixes to the stock Lua.
 FrameXMLFixes.xml
+# The touch interface and its PC/mobile switch, after every other layer file it rescales.
+MobileInterface.xml

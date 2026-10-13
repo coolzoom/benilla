@@ -3484,6 +3484,10 @@ mod tests {
                  writes and derives it here in cvars.rs",
             ),
             (
+                "mobileInterface",
+                "MobileInterface.xml picks its layout at load and its switch writes it",
+            ),
+            (
                 "useUiScale",
                 "UIOptionsFrame.lua and OptionsFrame.lua branch on it to gate the uiScale slider",
             ),

@@ -29,7 +29,7 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 
 use benilla_ui::script::keybind::KeybindRequest;
-use benilla_ui::script::{KeyUp, KeyWalk, UiScript};
+use benilla_ui::script::{BindingInput, FiredInput, KeyUp, KeyWalk, UiScript};
 
 use crate::char_select::InWorldGated;
 use crate::ui_script::{PlayerUiHover, PointerOverUiPanel, UiKeyboardCapture};
@@ -94,6 +94,12 @@ pub(crate) struct BindingsState {
     /// pass, so a window deactivate empties it and a key held across an alt-tab resumes, as in
     /// the reference. Keyboard only: mouse edges cannot repeat.
     down: KeyDownList,
+    /// The touch stick's directions, wanted this frame ([`Self::set_touch_moves`]).
+    touch_want: Vec<Input>,
+    /// The directions the stick holds, so letting go stops only what it started.
+    touch_held: Vec<Input>,
+    /// The touch buttons' one-shots, fired at the next pass.
+    touch_fire: Vec<FiredInput>,
 }
 
 /// The keys believed down, the reference's own list (`0x4248b3`): a press of a key on it is an
@@ -170,6 +176,40 @@ impl BindingsState {
     pub(crate) fn steering(&self) -> bool {
         self.pressed(Input::TurnOrAction) && self.pressed(Input::CameraOrSelectOrMove)
     }
+    /// The directions the touch stick wants held from the next pass: each Start and Stop is the
+    /// one a key's body sends, so the stick moves the player as the keys do.
+    // Driven by `touch_mouse`, an Android module.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub(crate) fn set_touch_moves(&mut self, want: &[Input]) {
+        self.touch_want = want.to_vec();
+    }
+
+    /// A touch button's one-shot (Jump, autorun, a pinch's zoom), fired at the next pass.
+    // Driven by `touch_mouse`, an Android module.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub(crate) fn fire_touch(&mut self, input: FiredInput) {
+        self.touch_fire.push(input);
+    }
+
+    /// The stick's level against what it holds, as Starts and Stops: re-asserted every pass, so
+    /// a held stick survives the bulk clears of a load or a focus loss.
+    fn apply_touch(&mut self) {
+        let mut inputs = Vec::new();
+        for &i in &self.touch_want {
+            if !self.pressed(i) {
+                inputs.push(BindingInput::Start(script_input::held_of(i)));
+            }
+        }
+        for &i in &self.touch_held {
+            if !self.touch_want.contains(&i) {
+                inputs.push(BindingInput::Stop(script_input::held_of(i)));
+            }
+        }
+        self.touch_held = self.touch_want.clone();
+        inputs.extend(self.touch_fire.drain(..).map(BindingInput::Fire));
+        self.apply_script_input(inputs);
+    }
+
     /// [`Self::steering`] began this frame.
     pub(crate) fn steering_began(&self) -> bool {
         self.steering()
@@ -410,6 +450,7 @@ fn latch_and_dispatch(
         let inputs = s.take_binding_input();
         state.apply_script_input(inputs);
     }
+    state.apply_touch();
 
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);

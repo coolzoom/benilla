@@ -58,6 +58,18 @@ fn held_input(input: HeldInput) -> Input {
     }
 }
 
+/// [`held_input`] backwards, for the touch stick, which holds the four directions alone.
+pub(super) fn held_of(input: Input) -> HeldInput {
+    match input {
+        Input::MoveBackward => HeldInput::MoveBackward,
+        Input::TurnLeft => HeldInput::TurnLeft,
+        Input::TurnRight => HeldInput::TurnRight,
+        Input::StrafeLeft => HeldInput::StrafeLeft,
+        Input::StrafeRight => HeldInput::StrafeRight,
+        _ => HeldInput::MoveForward,
+    }
+}
+
 /// The one-shot a fire names, and its amount: a zoom's yards, else 1.0.
 fn fired_input(input: FiredInput) -> (Input, f32) {
     match input {

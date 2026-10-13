@@ -1,0 +1,513 @@
+<Ui>
+    <!--
+        The touch interface, on while the `mobileInterface` CVar is 1: the player's and the
+        target's portrait rings top left, a stick bottom left, an action wheel around the jump
+        button bottom right, menu, zoom and chat buttons, and the stock windows a size up for a
+        finger. The stock bars and unit frames go under a hidden parent, so FrameXML keeps them
+        updated. 1.12 has no touch input: the stick, the jump and the autorun button are hit by
+        the engine (`touch_mouse`), which drives them as their keys' bindings do, since the
+        movement functions refuse a call from outside a binding; everything else is a click.
+        A button top right switches between this and the stock layout, through a reload.
+    -->
+    <Script><![CDATA[
+        local mobile = GetCVar("mobileInterface") == "1"
+        local zh = GetLocale() == "zhCN" or GetLocale() == "zhTW"
+
+        -- ══ The switch, in both layouts ═════════════════════════════════════════════════════
+        local Toggle = CreateFrame("Button", "BenillaMobileToggle", UIParent, "UIPanelButtonTemplate")
+        Toggle:SetFrameStrata("HIGH")
+        Toggle:SetWidth(mobile and 120 or 72)
+        Toggle:SetHeight(mobile and 44 or 22)
+        if mobile then
+            Toggle:SetText(zh and "电脑界面" or "PC UI")
+        else
+            Toggle:SetText(zh and "手机" or "Mobile")
+        end
+        Toggle:SetScript("OnClick", function()
+            SetCVar("mobileInterface", mobile and "0" or "1")
+            ReloadUI()
+        end)
+        if not mobile then
+            Toggle:SetPoint("TOPRIGHT", UIParent, "TOPRIGHT", -196, -6)
+            return
+        end
+
+        -- ══ Pieces ══════════════════════════════════════════════════════════════════════════
+        local function Texture(parent, file, layer, width, height)
+            local texture = parent:CreateTexture(nil, layer or "BACKGROUND")
+            texture:SetTexture(file)
+            if width then
+                texture:SetWidth(width)
+                texture:SetHeight(height)
+            end
+            return texture
+        end
+
+        local function Resize(text, size)
+            local file, _, flags = text:GetFont()
+            text:SetFont(file, size, flags)
+        end
+
+        -- Moves a frame to an anchor, scaled, keeping the offsets in unscaled units.
+        local function Place(frame, point, relative, relativePoint, x, y, scale)
+            if not frame then
+                return
+            end
+            scale = scale or frame:GetScale()
+            frame:SetScale(scale)
+            frame:ClearAllPoints()
+            frame:SetPoint(point, relative, relativePoint, (x or 0) / scale, (y or 0) / scale)
+        end
+
+        -- A bar: its fill cut to the fraction, from a status bar texture.
+        local function Bar(parent, width, height, r, g, b)
+            local bar = CreateFrame("Frame", nil, parent)
+            bar:SetWidth(width)
+            bar:SetHeight(height)
+            local track = Texture(bar, "Interface\\Tooltips\\UI-Tooltip-Background", "BACKGROUND")
+            track:SetVertexColor(0, 0, 0, 0.7)
+            track:SetPoint("TOPLEFT", bar, "TOPLEFT", -2, 2)
+            track:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", 2, -2)
+            local fill = Texture(bar, "Interface\\TargetingFrame\\UI-StatusBar", "ARTWORK")
+            fill:SetVertexColor(r, g, b)
+            fill:SetPoint("TOPLEFT", bar, "TOPLEFT", 0, 0)
+            fill:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT", 0, 0)
+            local text = bar:CreateFontString(nil, "OVERLAY", "TextStatusBarText")
+            text:SetPoint("CENTER", bar, "CENTER", 0, 0)
+            bar.fill, bar.text = fill, text
+            function bar:SetColor(r, g, b)
+                self.fill:SetVertexColor(r, g, b)
+            end
+            function bar:Set(value, max)
+                local fraction = max and max > 0 and math.min(math.max(value / max, 0), 1) or 0
+                if fraction == self.fraction then
+                    return
+                end
+                self.fraction = fraction
+                self.fill:SetTexCoord(0, fraction, 0, 1)
+                self.fill:SetWidth(math.max(self:GetWidth() * fraction, 0.01))
+                if fraction <= 0 then
+                    self.fill:Hide()
+                else
+                    self.fill:Show()
+                end
+            end
+            bar:Set(0, 1)
+            return bar
+        end
+
+        -- A round icon button.
+        local function IconButton(parent, name, file, size, onClick, label)
+            local button = CreateFrame("Button", name, parent)
+            button:SetWidth(size)
+            button:SetHeight(size)
+            local icon = Texture(button, file, "ARTWORK")
+            icon:SetAllPoints(button)
+            button.icon = icon
+            local border = Texture(button, "Interface\\Minimap\\MiniMap-TrackingBorder", "OVERLAY")
+            border:SetWidth(size * 1.7)
+            border:SetHeight(size * 1.7)
+            border:SetPoint("TOPLEFT", button, "TOPLEFT", -size * 0.12, size * 0.12)
+            button:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square")
+            button:GetHighlightTexture():SetBlendMode("ADD")
+            button:SetScript("OnMouseDown", function() this.icon:SetVertexColor(0.7, 0.7, 0.7) end)
+            button:SetScript("OnMouseUp", function() this.icon:SetVertexColor(1, 1, 1) end)
+            if onClick then
+                button:SetScript("OnClick", onClick)
+            end
+            if label then
+                local text = button:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+                text:SetPoint("TOP", button, "BOTTOM", 0, -2)
+                text:SetText(label)
+                button.label = text
+            end
+            return button
+        end
+
+        local Hud = CreateFrame("Frame", "BenillaMobileHud", UIParent)
+        Hud:SetAllPoints(UIParent)
+        Hud:SetFrameStrata("LOW")
+
+        local Hidden = CreateFrame("Frame", "BenillaMobileHiddenParent", UIParent)
+        Hidden:Hide()
+
+        local function Hide(frame)
+            if frame then
+                frame:SetParent(Hidden)
+            end
+        end
+        -- ══ Portrait rings ══════════════════════════════════════════════════════════════════
+        local RING = 150
+        local POWER_COLORS = {
+            [0] = { 0.1, 0.45, 1 }, [1] = { 0.95, 0.1, 0.1 }, [2] = { 1, 0.6, 0.1 }, [3] = { 1, 0.9, 0.1 },
+        }
+
+        local function UnitRing(unit, name, x)
+            local ring = CreateFrame("Button", name, Hud)
+            ring:SetWidth(RING + 280)
+            ring:SetHeight(RING)
+            ring:SetPoint("TOPLEFT", Hud, "TOPLEFT", x, -4)
+            ring:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+            ring.unit = unit
+            local portrait = ring:CreateTexture(name .. "Portrait", "BACKGROUND")
+            portrait:SetWidth(RING * 0.74)
+            portrait:SetHeight(RING * 0.74)
+            portrait:SetPoint("CENTER", ring, "LEFT", RING / 2, 0)
+            ring.portrait = portrait
+            local border = Texture(ring, "Interface\\Minimap\\MiniMap-TrackingBorder", "ARTWORK")
+            border:SetWidth(RING * 1.62)
+            border:SetHeight(RING * 1.62)
+            border:SetPoint("TOPLEFT", ring, "TOPLEFT", -RING * 0.04, RING * 0.04)
+            ring.level = ring:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+            ring.level:SetPoint("BOTTOM", portrait, "BOTTOM", 0, -6)
+            Resize(ring.level, 20)
+            ring.name = ring:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+            Resize(ring.name, 22)
+            ring.name:SetPoint("TOPLEFT", ring, "TOPLEFT", RING + 6, -18)
+            ring.name:SetJustifyH("LEFT")
+            ring.health = Bar(ring, 260, 22, 0.1, 0.9, 0.1)
+            ring.health:SetPoint("TOPLEFT", ring.name, "BOTTOMLEFT", 0, -10)
+            ring.power = Bar(ring, 260, 22, 0.1, 0.45, 1)
+            ring.power:SetPoint("TOPLEFT", ring.health, "BOTTOMLEFT", 0, -10)
+            Resize(ring.health.text, 16)
+            Resize(ring.power.text, 16)
+            return ring
+        end
+
+        local function UpdateRing(ring)
+            local unit = ring.unit
+            if not UnitExists(unit) then
+                return
+            end
+            local level = UnitLevel(unit)
+            ring.level:SetText(level and level > 0 and level or "??")
+            ring.name:SetText(UnitName(unit))
+            if unit == "target" then
+                local reaction = UnitReaction(unit, "player") or 4
+                local color = UnitReactionColor and UnitReactionColor[reaction]
+                if color then
+                    ring.name:SetTextColor(color.r, color.g, color.b)
+                end
+            end
+            local health, healthMax = UnitHealth(unit), UnitHealthMax(unit)
+            ring.health:Set(health, healthMax)
+            ring.health.text:SetText(health .. " / " .. healthMax)
+            local powerType = UnitPowerType(unit) or 0
+            if powerType ~= ring.powerType then
+                ring.powerType = powerType
+                local c = POWER_COLORS[powerType] or POWER_COLORS[0]
+                ring.power:SetColor(c[1], c[2], c[3])
+            end
+            local mana, manaMax = UnitMana(unit), UnitManaMax(unit)
+            ring.power:Set(mana, manaMax)
+            ring.power.text:SetText(manaMax > 0 and (mana .. " / " .. manaMax) or "")
+            if manaMax > 0 then
+                ring.power:Show()
+            else
+                ring.power:Hide()
+            end
+        end
+
+        local Player = UnitRing("player", "BenillaMobilePlayerRing", 8)
+        Player:SetScript("OnClick", function()
+            if arg1 == "RightButton" then
+                ToggleDropDownMenu(1, nil, PlayerFrameDropDown, "BenillaMobilePlayerRing", 120, 20)
+            else
+                TargetUnit("player")
+            end
+        end)
+
+        local Target = UnitRing("target", "BenillaMobileTargetRing", 460)
+        Target:Hide()
+        -- A tap opens the stock unit menu: whisper, invite, trade, follow, duel, inspect.
+        Target:SetScript("OnClick", function()
+            ToggleDropDownMenu(1, nil, TargetFrameDropDown, "BenillaMobileTargetRing", 120, 20)
+        end)
+
+        -- ══ Stick ═══════════════════════════════════════════════════════════════════════════
+        -- Drawn here, driven by the engine: `touch_mouse` holds the finger that lands on it and
+        -- moves the knob through BenillaMobileStick_SetKnob.
+        local Stick = CreateFrame("Frame", "BenillaMobileStick", Hud)
+        Stick:SetWidth(260)
+        Stick:SetHeight(260)
+        Stick:SetPoint("BOTTOMLEFT", Hud, "BOTTOMLEFT", 40, 30)
+        -- Mouse-enabled so a press on it is the UI's and never also the world's.
+        Stick:EnableMouse(true)
+        -- Round fills: a flat texture cut to the portrait circle.
+        local stickBase = Stick:CreateTexture("BenillaMobileStickBase", "BACKGROUND")
+        SetPortraitToTexture("BenillaMobileStickBase", "Interface\\Buttons\\WHITE8X8")
+        stickBase:SetAllPoints(Stick)
+        stickBase:SetVertexColor(0, 0, 0, 0.35)
+        local stickRing = Texture(Stick, "Interface\\Minimap\\MiniMap-TrackingBorder", "BORDER", 440, 440)
+        stickRing:SetPoint("TOPLEFT", Stick, "TOPLEFT", -26, 26)
+        local knob = Stick:CreateTexture("BenillaMobileStickKnob", "ARTWORK")
+        SetPortraitToTexture("BenillaMobileStickKnob", "Interface\\Buttons\\WHITE8X8")
+        knob:SetWidth(110)
+        knob:SetHeight(110)
+        knob:SetVertexColor(1, 0.82, 0.3, 0.8)
+        knob:SetPoint("CENTER", Stick, "CENTER", 0, 0)
+
+        function BenillaMobileStick_SetKnob(dx, dy)
+            knob:SetPoint("CENTER", Stick, "CENTER", dx, dy)
+        end
+        -- ══ Action wheel ════════════════════════════════════════════════════════════════════
+        -- Six action slots on two arcs around the jump button, pages 1-6 and 7-12.
+        local Wheel = CreateFrame("Frame", "BenillaMobileWheel", Hud)
+        Wheel:SetWidth(1)
+        Wheel:SetHeight(1)
+        Wheel:SetPoint("CENTER", Hud, "BOTTOMRIGHT", -110, 110)
+        Wheel.offset = 0
+
+        local SLOT = 96
+        local slots = { { 165, 180 }, { 165, 135 }, { 165, 90 }, { 290, 172 }, { 290, 132 }, { 290, 92 } }
+        local actionButtons = {}
+
+        local function WheelUpdate(button)
+            local old = this
+            this = button
+            ActionButton_Update()
+            this = old
+            button:Show()
+            local hotkey = getglobal(button:GetName() .. "HotKey")
+            if hotkey then
+                hotkey:SetText("")
+            end
+        end
+
+        local function WheelRefresh()
+            local bonus = GetBonusBarOffset() > 0
+            for i, button in ipairs(actionButtons) do
+                button.isBonus = bonus
+                button:SetID(i + Wheel.offset)
+                WheelUpdate(button)
+            end
+        end
+
+        for i, place in ipairs(slots) do
+            local x, y = place[1] * cos(place[2]), place[1] * sin(place[2])
+            local button = CreateFrame("CheckButton", "BenillaMobileActionButton" .. i, Wheel, "ActionBarButtonTemplate")
+            button:SetID(i)
+            Place(button, "CENTER", Wheel, "CENTER", x, y, SLOT / 36)
+            button.showgrid = 1
+            actionButtons[i] = button
+        end
+
+        local wheelEvents = CreateFrame("Frame", nil, Wheel)
+        for _, e in ipairs({ "PLAYER_ENTERING_WORLD", "UPDATE_BONUS_ACTIONBAR", "ACTIONBAR_PAGE_CHANGED", "ACTIONBAR_SLOT_CHANGED" }) do
+            wheelEvents:RegisterEvent(e)
+        end
+        wheelEvents:SetScript("OnEvent", WheelRefresh)
+
+        -- Jump and autorun are the engine's to fire (`touch_mouse`): mouse-off frames it hits.
+        local function EngineButton(name, file, size)
+            local frame = CreateFrame("Frame", name, Hud)
+            frame:SetWidth(size)
+            frame:SetHeight(size)
+            frame:EnableMouse(true)
+            local icon = Texture(frame, file, "ARTWORK")
+            icon:SetAllPoints(frame)
+            local border = Texture(frame, "Interface\\Minimap\\MiniMap-TrackingBorder", "OVERLAY", size * 1.7, size * 1.7)
+            border:SetPoint("TOPLEFT", frame, "TOPLEFT", -size * 0.12, size * 0.12)
+            return frame
+        end
+        local JumpButton = EngineButton("BenillaMobileJump", "Interface\\Icons\\Ability_Rogue_Sprint", 116)
+        JumpButton:SetPoint("CENTER", Wheel, "CENTER", 0, 0)
+
+        local Switch = IconButton(Hud, "BenillaMobileWheelSwitch", "Interface\\Buttons\\UI-EmptySlot-Disabled", 72, function()
+            Wheel.offset = Wheel.offset == 0 and 6 or 0
+            this.page:SetText(Wheel.offset == 0 and "1" or "2")
+            WheelRefresh()
+        end)
+        Switch:SetPoint("CENTER", Wheel, "CENTER", 0, 400)
+        Switch.page = Switch:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")
+        Switch.page:SetPoint("CENTER", Switch, "CENTER", 0, 0)
+        Switch.page:SetText("1")
+
+        local NextTarget = IconButton(Hud, "BenillaMobileTargetNearest", "Interface\\Icons\\Ability_Hunter_SniperShot", 84,
+            function() TargetNearestEnemy() end)
+        NextTarget:SetPoint("CENTER", Wheel, "CENTER", -200, 330)
+        -- ══ Menu, camera, chat ══════════════════════════════════════════════════════════════
+        local Menu = CreateFrame("Frame", "BenillaMobileMenu", UIParent)
+        Menu:SetFrameStrata("DIALOG")
+        Menu:SetWidth(780)
+        Menu:SetHeight(400)
+        Menu:SetPoint("CENTER", UIParent, "CENTER", 0, 40)
+        Menu:EnableMouse(true)
+        Menu:SetBackdrop({
+            bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+            edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+            tile = true, tileSize = 32, edgeSize = 32,
+            insets = { left = 11, right = 12, top = 12, bottom = 11 },
+        })
+        Menu:Hide()
+        do
+            local items = {
+                { "Interface\\Icons\\INV_Helmet_03", CHARACTER_BUTTON, function() ToggleCharacter("PaperDollFrame") end },
+                { "Interface\\Buttons\\Button-Backpack-Up", zh and "背包" or "Bags", function() OpenAllBags() end },
+                { "Interface\\Icons\\INV_Misc_Book_09", SPELLBOOK_ABILITIES_BUTTON, function() ToggleSpellBook(BOOKTYPE_SPELL) end },
+                { "Interface\\Icons\\Ability_Marksmanship", TALENTS_BUTTON, function() ToggleTalentFrame() end },
+                { "Interface\\Icons\\INV_Misc_Note_01", QUESTLOG_BUTTON, function() ToggleQuestLog() end },
+                { "Interface\\Icons\\INV_Misc_Map_01", WORLDMAP_BUTTON, function() ToggleWorldMap() end },
+                { "Interface\\Icons\\INV_Misc_Note_02", SOCIAL_BUTTON, function() ToggleFriendsFrame() end },
+                { "Interface\\Icons\\Spell_Holy_PrayerOfSpirit", zh and "坐下/站立" or "Sit", function() SitOrStand() end },
+                { "Interface\\Icons\\INV_Misc_QuestionMark", HELP_BUTTON, function() ToggleHelpFrame() end },
+                { "Interface\\Icons\\INV_Misc_Gear_01", MAINMENU_BUTTON, function() ToggleGameMenu(1) end },
+            }
+            for i, item in ipairs(items) do
+                local row = math.floor((i - 1) / 5)
+                local column = i - 1 - row * 5
+                local run = item[3]
+                local button = IconButton(Menu, "BenillaMobileMenu" .. i, item[1], 96, function()
+                    Menu:Hide()
+                    run()
+                end, item[2])
+                button:SetPoint("TOPLEFT", Menu, "TOPLEFT", 58 + column * 140, -44 - row * 180)
+            end
+            local close = CreateFrame("Button", "BenillaMobileMenuClose", Menu, "UIPanelCloseButton")
+            close:SetWidth(64)
+            close:SetHeight(64)
+            close:SetPoint("TOPRIGHT", Menu, "TOPRIGHT", 4, 4)
+        end
+
+        local MenuButton = IconButton(Hud, "BenillaMobileMenuButton", "Interface\\Icons\\INV_Misc_Gear_01", 80, function()
+            if Menu:IsShown() then
+                Menu:Hide()
+            else
+                Menu:Show()
+            end
+        end)
+        MenuButton:SetPoint("TOPRIGHT", Hud, "TOPRIGHT", -300, -70)
+        local ZoomIn = IconButton(Hud, "BenillaMobileZoomIn", "Interface\\Buttons\\UI-PlusButton-Up", 64,
+            function() CameraZoomIn(3) end)
+        ZoomIn:SetPoint("TOP", MenuButton, "BOTTOM", 0, -22)
+        local ZoomOut = IconButton(Hud, "BenillaMobileZoomOut", "Interface\\Buttons\\UI-MinusButton-Up", 64,
+            function() CameraZoomOut(3) end)
+        ZoomOut:SetPoint("TOP", ZoomIn, "BOTTOM", 0, -22)
+
+        local Chat = CreateFrame("Button", "BenillaMobileChatButton", Hud, "UIPanelButtonTemplate")
+        Chat:SetWidth(220)
+        Chat:SetHeight(64)
+        Chat:SetPoint("BOTTOM", Hud, "BOTTOM", -20, 6)
+        Chat:SetText(CHAT or (zh and "聊天" or "Chat"))
+        Chat:SetScript("OnClick", function() ChatFrame_OpenChat("") end)
+        local AutoRun = EngineButton("BenillaMobileAutoRun", "Interface\\Icons\\Ability_Tracking", 80)
+        AutoRun:SetPoint("RIGHT", Chat, "LEFT", -30, 0)
+
+        local Xp = Bar(Hud, 600, 10, 0.58, 0, 0.55)
+        Xp:SetPoint("BOTTOM", Hud, "BOTTOM", -20, 80)
+        -- ══ The stock frames ════════════════════════════════════════════════════════════════
+        -- Windows, menus and tooltips a size up, so their buttons take a finger.
+        local Bigger = {
+            "CharacterFrame", "SpellBookFrame", "QuestLogFrame", "FriendsFrame", "GameMenuFrame",
+            "BenillaOptionsFrame", "MerchantFrame", "GossipFrame", "QuestFrame", "LootFrame",
+            "TaxiFrame", "TradeFrame", "BankFrame", "MailFrame", "OpenMailFrame", "HelpFrame",
+            "PetStableFrame", "TabardFrame", "GuildRegistrarFrame", "PetitionFrame", "ItemTextFrame",
+            "DressUpFrame", "GroupLootFrame1", "StaticPopup1", "StaticPopup2", "StaticPopup3",
+            "StaticPopup4", "GameTooltip", "ItemRefTooltip", "ContainerFrame1", "ContainerFrame2",
+            "ContainerFrame3", "ContainerFrame4", "ContainerFrame5", "ClassTrainerFrame",
+            "TalentFrame", "WorldMapFrame",
+        }
+
+        local function Arrange()
+            Hide(PlayerFrame)
+            Hide(TargetFrame)
+            Hide(MainMenuBar)
+            Hide(MultiBarBottomLeft)
+            Hide(MultiBarBottomRight)
+            Hide(MultiBarLeft)
+            Hide(MultiBarRight)
+            if ShapeshiftBarFrame then
+                ShapeshiftBarFrame:SetParent(Hud)
+                Place(ShapeshiftBarFrame, "BOTTOMRIGHT", Hud, "BOTTOMRIGHT", -460, 20, 1.5)
+            end
+            if PetActionBarFrame then
+                PetActionBarFrame:SetParent(Hud)
+                Place(PetActionBarFrame, "BOTTOMRIGHT", Hud, "BOTTOMRIGHT", -480, 110, 1.3)
+            end
+            if MinimapCluster then
+                Place(MinimapCluster, "TOPRIGHT", UIParent, "TOPRIGHT", 0, -40, 1.3)
+            end
+            if TemporaryEnchantFrame then
+                Place(TemporaryEnchantFrame, "TOPRIGHT", UIParent, "TOPLEFT", 460, -160, 1.2)
+            end
+            if PartyMemberFrame1 then
+                Place(PartyMemberFrame1, "TOPLEFT", UIParent, "TOPLEFT", 10, -200, 1.2)
+            end
+            if CastingBarFrame then
+                Place(CastingBarFrame, "BOTTOM", UIParent, "BOTTOM", 0, 330, 1.3)
+            end
+            if ChatFrame1 then
+                ChatFrame1:ClearAllPoints()
+                ChatFrame1:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", 340, 100)
+                ChatFrame1:SetWidth(520)
+                ChatFrame1:SetHeight(150)
+                if FCF_SetChatWindowFontSize then
+                    FCF_SetChatWindowFontSize(ChatFrame1, 16)
+                end
+            end
+            for _, name in ipairs(Bigger) do
+                local frame = getglobal(name)
+                if frame then
+                    frame:SetScale(1.3)
+                end
+            end
+            for i = 1, 3 do
+                local list = getglobal("DropDownList" .. i)
+                if list then
+                    list:SetScale(1.5)
+                end
+            end
+        end
+
+        -- Tooltips without an owner's anchor go left of the minimap, clear of the wheel.
+        function GameTooltip_SetDefaultAnchor(tooltip, parent)
+            tooltip:SetOwner(parent, "ANCHOR_NONE")
+            tooltip:SetPoint("TOPRIGHT", UIParent, "TOPRIGHT", -400 / tooltip:GetScale(), -280 / tooltip:GetScale())
+        end
+
+        Toggle:SetParent(Hud)
+        Toggle:SetPoint("TOPRIGHT", Hud, "TOPRIGHT", -260, -8)
+
+        -- ══ Updates ═════════════════════════════════════════════════════════════════════════
+        local function UpdatePortraits()
+            SetPortraitTexture(Player.portrait, "player")
+            if UnitExists("target") then
+                SetPortraitTexture(Target.portrait, "target")
+            end
+        end
+
+        Hud:RegisterEvent("PLAYER_ENTERING_WORLD")
+        Hud:RegisterEvent("PLAYER_TARGET_CHANGED")
+        Hud:RegisterEvent("UNIT_PORTRAIT_UPDATE")
+        Hud:SetScript("OnEvent", function()
+            if event == "PLAYER_ENTERING_WORLD" then
+                Arrange()
+            elseif event == "PLAYER_TARGET_CHANGED" then
+                if UnitExists("target") then
+                    Target:Show()
+                    UpdateRing(Target)
+                else
+                    Target:Hide()
+                end
+            end
+            UpdatePortraits()
+        end)
+
+        local elapsed = 0
+        Hud:SetScript("OnUpdate", function()
+            elapsed = elapsed + arg1
+            if elapsed < 0.1 then
+                return
+            end
+            elapsed = 0
+            UpdateRing(Player)
+            if Target:IsShown() then
+                UpdateRing(Target)
+            end
+            Xp:Set(UnitXP("player"), UnitXPMax("player"))
+        end)
+
+        Arrange()
+        WheelRefresh()
+    ]]></Script>
+</Ui>

@@ -1951,6 +1951,9 @@ fn the_layer_does_not_grow() {
         "SpellBookAdapters.xml",
         "ScriptLogFrame.xml",
         "FrameXMLFixes.xml",
+        // Deviation: a touch interface, because benilla runs on phones and 1.12.1 has none; it
+        // replaces the stock bars while `mobileInterface` is 1 and is one switch in the stock one.
+        "MobileInterface.xml",
     ];
     assert_eq!(
         super::addons::Addon::layer().toc.files,
