@@ -29,7 +29,11 @@ Every upstream file iNilla changes, and why. Each change is marked `iNilla` in a
 | `Cargo.toml` | `[profile.ios]` (release, no LTO, symbols kept) |
 | `crates/benilla-app/Cargo.toml` | depends on `inilla-core`, `inilla-platform`, `ureq`, `serde_json`; `bevy_egui` no longer optional; `arboard` not on iOS; the Wayland clipboard's `cfg` excludes iOS; `raw-window-handle` and `winit` on iOS |
 | `crates/benilla-app/src/lib.rs` | `mod inilla`, `pub use inilla_boot`, `add_plugins(inilla::InillaPlugin)` |
-| `crates/benilla-app/src/bindings.rs`, `bindings/script_input.rs` | the synthetic seam `synth_hold`/`synth_release`/`synth_fire` and `Held::Synth` |
+| `crates/benilla-app/src/bindings.rs`, `bindings/script_input.rs` | the synthetic seam `synth_hold`/`synth_release`/`synth_fire` and `Held::Synth`; the touch stick's `set_touch_moves`/`fire_touch`/`apply_touch` with `held_of`, since the stock movement functions refuse a call from outside a binding body |
+| `crates/benilla-app/src/cvars/table.rs` | the `mobileInterface` row: the touch interface's CVar, on by default on Android |
+| `crates/benilla-app/src/touch_mouse.rs` | the touch interface's finger router — the stick, the engine-hit buttons, the world drag and the pinch — gated on `mobileInterface` |
+| `crates/benilla-app/src/inilla/touch.rs`, `hud.rs` | `hud_visible`/`layer_touch`/`touch_owns`: iNilla's egui HUD stands down while the FrameXML layer owns touch, so exactly one interface is live |
+| `crates/benilla-app/src/lib.rs` | `touch_mouse` is built on every platform, not Android alone |
 | `crates/benilla-app/src/textinput/clipboard.rs` | the iOS pasteboard backend |
 | `crates/benilla-app/src/login/mod.rs` | `Attempt`/`send` `pub(crate)`, `in_flight()` — the launcher submits through the login screen's path |
 | `crates/benilla-app/src/net/io.rs` | the world address passes through `inilla::world_address` (the realm override) |
