@@ -84,9 +84,17 @@ fetch() {
         return 0
     fi
     say "下载 $url"
-    # `-C -` resumes a `.part` an interrupted run left behind.
+    # `-C -` resumes a `.part` an interrupted run left behind, but only when it came from this
+    # same URL: resuming onto a stale one from another release appends two archives' bytes and
+    # yields a file that unpacks to nonsense. The URL is recorded beside it.
+    if [ -f "$dest.part" ] && [ "$(cat "$dest.part.url" 2>/dev/null)" != "$url" ]; then
+        say "忽略不同来源的断点续传文件"
+        rm -f "$dest.part" "$dest.part.url"
+    fi
+    printf '%s' "$url" >"$dest.part.url"
     curl -fL --retry 5 --retry-all-errors -C - -o "$dest.part" "$url"
     mv "$dest.part" "$dest"
+    rm -f "$dest.part.url"
 }
 
 # ── setup ───────────────────────────────────────────────────────────────────────────────────────
@@ -421,21 +429,47 @@ xapk() {
 # Install an XAPK the way an XAPK installer does: the APK, then each expansion into the OBB folder.
 xapk_install() {
     require_device
-    local file="${1:-$out/benilla.xapk}" tmp
+    local file="${1:-$out/benilla.xapk}" tmp name
     [ -f "$file" ] || die "没有 ${file}（先运行 ./android.sh xapk）"
+    # The APK alone is unpacked (44 MB). Each MPQ streams out of the archive into the device, so
+    # the 5.3 GB expansion set never touches this disk — it used to be unzipped whole first, which
+    # needs its own 5.3 GB and leaves it behind when the push fails partway.
     tmp="$work/xapk-install"
     rm -rf "$tmp" && mkdir -p "$tmp"
-    unzip -q "$file" -d "$tmp"
+    unzip -o -q "$file" "$PKG.apk" -d "$tmp"
     say "adb install $PKG.apk"
     adb_ install -r -d "$tmp/$PKG.apk"
-    adb_ shell mkdir -p "/sdcard/$OBB_DIR"
-    local f
-    for f in "$tmp/$OBB_DIR"/*; do
-        say "adb push $(basename "$f") -> /sdcard/$OBB_DIR/"
-        adb_ push "$f" "/sdcard/$OBB_DIR/" >/dev/null
-    done
     rm -rf "$tmp"
+    adb_ shell mkdir -p "/sdcard/$OBB_DIR"
+    while read -r name; do
+        say "推送 $name -> /sdcard/$OBB_DIR/"
+        unzip -p "$file" "$OBB_DIR/$name" | adb_ shell "cat > /sdcard/$OBB_DIR/$name"
+    done < <(unzip -Z1 "$file" "$OBB_DIR/*.MPQ" 2>/dev/null | sed "s|^$OBB_DIR/||")
     say "已安装 $file"
+}
+
+# Free the disk the flow owns: the download cache, the XAPK, the APK and the Android target tree.
+# The sources of all of them are elsewhere, so a clean costs only a rebuild.
+clean() {
+    local what=("$work/dl" "$work/xapk" "$work/xapk-install" "$out" "$(dirname "$(so_path)")")
+    local d total=0
+    for d in "${what[@]}"; do
+        [ -e "$d" ] || continue
+        du -sh "$d" 2>/dev/null
+        total=$((total + $(du -sk "$d" | cut -f1)))
+    done
+    printf '共 %s。删除？[y/N] ' "$(echo "$total" | awk '{printf "%.1f GB", $1/1048576}')"
+    local answer=""
+    read -r answer || true
+    case "$answer" in
+    y | Y) ;;
+    *)
+        echo "未删除。"
+        return 0
+        ;;
+    esac
+    for d in "${what[@]}"; do rm -rf "$d"; done
+    say "已清理。下次运行 ./android.sh 2 会重新编译。"
 }
 
 # ── device ──────────────────────────────────────────────────────────────────────────────────────
@@ -628,6 +662,7 @@ usage() {
     echo "  6  打包 XAPK（_work/out/benilla.xapk，含全部游戏数据），手机上用 XAPK 安装器安装"
     echo "  7  通过 adb 安装 XAPK"
     echo "  data  只推送游戏数据"
+    echo "  clean 删除下载缓存、XAPK、APK 和安卓编译产物（下次要重新编译）"
     echo "环境变量: ANDROID_PROFILE=release|ship|play  ANDROID_DEV=0  ANDROID_SERIAL=<id>  ANDROID_REVERSE=0"
 }
 
@@ -644,13 +679,15 @@ menu() {
     echo "  5) 全部（1 到 4）"
     echo "  6) 打包 XAPK（含游戏数据）"
     echo "  7) 通过 adb 安装 XAPK"
+    echo "  c) 清理磁盘（下载缓存、XAPK、APK、安卓编译产物）"
     echo "  q) 退出"
-    printf '选择 [1/2/3/4/5/6/7/q]: '
+    printf '选择 [1/2/3/4/5/6/7/c/q]: '
     read -r choice || exit 0
     case "$choice" in
     [1-7]) bash "$0" "$choice" || echo "步骤 $choice 失败。" ;;
+    c | C | clean) bash "$0" clean || echo "清理失败。" ;;
     q | Q) exit 0 ;;
-    *) echo "请输入 1、2、3、4、5、6、7 或 q。" ;;
+    *) echo "请输入 1、2、3、4、5、6、7、c 或 q。" ;;
     esac
 }
 
@@ -664,6 +701,7 @@ case "${1:-}" in
 7 | xapk-install) xapk_install "${2:-}" ;;
 install) install_apk ;;
 data) push_data ;;
+clean) clean ;;
 run) run_app ;;
 -h | --help) usage ;;
 "")
