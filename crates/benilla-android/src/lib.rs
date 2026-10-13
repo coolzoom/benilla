@@ -5,7 +5,7 @@
 //! file is the app's own; files adb writes into the external folder are not, on an emulator.
 //!
 //! ```text
-//! /data/user/0/org.benilla.client/files/
+//! /data/user/0/org.oacnilla.client/files/
 //!   benilla.env       WOW_USER=…, WOW_NOSOUND=…, one KEY=VALUE per line
 //!   WoW/Data/         the player's own 1.12.1 Data, read-only
 //!   benilla-config/   benilla's local state

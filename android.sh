@@ -4,15 +4,15 @@
 #   ./android.sh            menu
 #   ./android.sh 1          JDK into _work/, Android SDK and NDK into ../android-sdk, the rustup target
 #   ./android.sh 2          cargo build of crates/benilla-android for arm64-v8a
-#   ./android.sh 3          _work/out/benilla.apk (NativeActivity, no Java code)
+#   ./android.sh 3          _work/out/oacnilla.apk (NativeActivity, no Java code)
 #   ./android.sh 4          adb install, benilla.env, adb reverse, game data if missing, launch
 #   ./android.sh 5          1 to 4
-#   ./android.sh 6          _work/out/benilla.xapk: the APK and every Data MPQ, for a phone's XAPK installer
+#   ./android.sh 6          _work/out/oacnilla.xapk: the APK and every Data MPQ, for a phone's XAPK installer
 #   ./android.sh 7          install an XAPK over adb, as an XAPK installer does
 #   ./android.sh data       adb push the WoW Data folder (several GB) on its own
 #   ./android.sh install    and `run`: the two halves of 4
 #   ./android.sh xapk       same as 6
-#   ./android.sh xapk-install [file]   same as 7; an optional path overrides _work/out/benilla.xapk
+#   ./android.sh xapk-install [file]   same as 7; an optional path overrides _work/out/oacnilla.xapk
 #
 # Switches (environment):
 #   ANDROID_PROFILE=release|ship|play   cargo profile (default release)
@@ -32,7 +32,7 @@ cd "$root"
 work="$root/_work"
 out="$work/out"
 
-PKG="org.benilla.client"
+PKG="org.oacnilla.client"
 LIB="benilla_android"
 ABI="arm64-v8a"
 TARGET="aarch64-linux-android"
@@ -290,7 +290,7 @@ write_manifest() {
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <application
-        android:label="benilla"
+        android:label="oacnilla"
         android:hasCode="false"
         android:extractNativeLibs="true"
         android:debuggable="true"
@@ -331,7 +331,7 @@ package() {
     [ -f "$so" ] || die "没有 ${so}（先运行 ./android.sh build）"
     bt="$ANDROID_HOME/build-tools/$BUILD_TOOLS"
     stage="$work/apk"
-    apk="$out/benilla.apk"
+    apk="$out/oacnilla.apk"
     rm -rf "$stage" && mkdir -p "$stage/lib/$ABI" "$out"
 
     say "strip -> lib/$ABI/lib$LIB.so"
@@ -374,12 +374,12 @@ data_mpqs() {
 write_xapk_manifest() {
     local f="$1" data="$2" version size name first=1
     version="$(version_name)"
-    size="$(du -sk "$out/benilla.apk" | cut -f1)"
+    size="$(du -sk "$out/oacnilla.apk" | cut -f1)"
     {
         echo '{'
         echo '  "xapk_version": 2,'
         echo "  \"package_name\": \"$PKG\","
-        echo '  "name": "benilla",'
+        echo '  "name": "oacnilla",'
         echo "  \"version_code\": \"$(version_code)\","
         echo "  \"version_name\": \"$version\","
         echo "  \"min_sdk_version\": \"$API\","
@@ -401,7 +401,7 @@ write_xapk_manifest() {
     } >"$f"
 }
 
-# _work/out/benilla.xapk: APK, manifest.json and every MPQ, stored (MPQs compress no further).
+# _work/out/oacnilla.xapk: APK, manifest.json and every MPQ, stored (MPQs compress no further).
 xapk() {
     local data stage pkg_apk n
     data="$(local_data_dir)"
@@ -414,22 +414,22 @@ xapk() {
     pkg_apk="$PKG.apk"
     rm -rf "$stage" && mkdir -p "$stage/$OBB_DIR"
     # Symlinks, so 5 GB is not copied twice; zip stores what they point at.
-    ln -s "$out/benilla.apk" "$stage/$pkg_apk"
+    ln -s "$out/oacnilla.apk" "$stage/$pkg_apk"
     while read -r name; do ln -s "$data/$name" "$stage/$OBB_DIR/$name"; done < <(data_mpqs "$data")
     write_xapk_manifest "$stage/manifest.json" "$data"
-    rm -f "$out/benilla.xapk"
-    say "打包 $n 个 MPQ（$(du -shL "$stage/$OBB_DIR" | cut -f1)）-> $out/benilla.xapk"
-    (cd "$stage" && zip -q -0 -r "$out/benilla.xapk" manifest.json "$pkg_apk" Android)
-    unzip -tq "$out/benilla.xapk" >/dev/null || die "benilla.xapk 校验失败"
+    rm -f "$out/oacnilla.xapk"
+    say "打包 $n 个 MPQ（$(du -shL "$stage/$OBB_DIR" | cut -f1)）-> $out/oacnilla.xapk"
+    (cd "$stage" && zip -q -0 -r "$out/oacnilla.xapk" manifest.json "$pkg_apk" Android)
+    unzip -tq "$out/oacnilla.xapk" >/dev/null || die "oacnilla.xapk 校验失败"
     rm -rf "$stage"
-    say "XAPK: $out/benilla.xapk ($(du -h "$out/benilla.xapk" | cut -f1))"
+    say "XAPK: $out/oacnilla.xapk ($(du -h "$out/oacnilla.xapk" | cut -f1))"
     say "手机上用 XAPK 安装器（APKPure、XAPK Installer 等）打开即可安装；或在选单里选 7（./android.sh 7）"
 }
 
 # Install an XAPK the way an XAPK installer does: the APK, then each expansion into the OBB folder.
 xapk_install() {
     require_device
-    local file="${1:-$out/benilla.xapk}" tmp name
+    local file="${1:-$out/oacnilla.xapk}" tmp name
     [ -f "$file" ] || die "没有 ${file}（先运行 ./android.sh xapk）"
     # The APK alone is unpacked (44 MB). Each MPQ streams out of the archive into the device, so
     # the 5.3 GB expansion set never touches this disk — it used to be unzipped whole first, which
@@ -513,9 +513,16 @@ write_device_env() {
         # No `WOW_HOST`: it would fix the realmlist for the session, and the player types the
         # server into the login screen's realmlist editor. `WOW_HOST` here only picks the
         # ports `adb reverse` forwards.
-        [ -n "${WOW_USER:-}" ] && echo "WOW_USER=$WOW_USER"
-        [ -n "${WOW_PASS:-}" ] && echo "WOW_PASS=$WOW_PASS"
-        [ -n "${WOW_CHAR:-}" ] && echo "WOW_CHAR=$WOW_CHAR"
+        #
+        # No `WOW_USER`/`WOW_PASS`/`WOW_CHAR` either, and that is deliberate: any of them in this
+        # file makes the client a **scripted** one — it logs in as that account at launch, and the
+        # player never sees the login screen to type their own server or account. A shipped build
+        # has no account. `ANDROID_ACCOUNT=1` puts them back for an unattended test run.
+        if [ "${ANDROID_ACCOUNT:-0}" = 1 ]; then
+            [ -n "${WOW_USER:-}" ] && echo "WOW_USER=$WOW_USER"
+            [ -n "${WOW_PASS:-}" ] && echo "WOW_PASS=$WOW_PASS"
+            [ -n "${WOW_CHAR:-}" ] && echo "WOW_CHAR=$WOW_CHAR"
+        fi
         # benilla reads the variable's presence, not its value: an empty line would mute too.
         [ -n "${WOW_NOSOUND:-}" ] && echo "WOW_NOSOUND=$WOW_NOSOUND"
         # An emulator's goldfish Vulkan encoder hangs under concurrent calls (benilla_world::boot).
@@ -550,7 +557,7 @@ reverse_ports() {
 
 install_apk() {
     require_device
-    local apk="$out/benilla.apk"
+    local apk="$out/oacnilla.apk"
     [ -f "$apk" ] || die "没有 ${apk}（先运行 ./android.sh package）"
     say "adb install $apk"
     adb_ install -r -d "$apk"
@@ -656,10 +663,10 @@ usage() {
     echo "用法: ./android.sh [1|2|3|4|5|6|7|data]"
     echo "  1  安装环境（JDK 到 _work/，Android SDK、NDK 到 $ANDROID_HOME，Rust 安卓目标）"
     echo "  2  编译（crates/benilla-android，arm64-v8a）"
-    echo "  3  打包 APK（_work/out/benilla.apk）"
+    echo "  3  打包 APK（_work/out/oacnilla.apk）"
     echo "  4  推送到设备并运行（adb install、benilla.env、游戏数据、logcat）"
     echo "  5  全部（1 到 4）"
-    echo "  6  打包 XAPK（_work/out/benilla.xapk，含全部游戏数据），手机上用 XAPK 安装器安装"
+    echo "  6  打包 XAPK（_work/out/oacnilla.xapk，含全部游戏数据），手机上用 XAPK 安装器安装"
     echo "  7  通过 adb 安装 XAPK"
     echo "  data  只推送游戏数据"
     echo "  clean 删除下载缓存、XAPK、APK 和安卓编译产物（下次要重新编译）"

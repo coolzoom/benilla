@@ -45,10 +45,17 @@ impl Plugin for TouchMousePlugin {
 /// Is the FrameXML touch layer the live interface? Only on a touch device, and only while its CVar
 /// is on. The same predicate stands iNilla's egui HUD down (`inilla::touch::layer_touch`), so
 /// whichever of the two is live owns every finger.
-fn layer_up(script: Option<NonSend<UiScript>>, cvars: Option<Res<crate::cvars::Cvars>>) -> bool {
+///
+/// **A run condition may not read `UiScript`.** The VM is a `NonSend` resource, so Bevy pins any
+/// *system* that names it to the main thread — but Bevy evaluates a condition on the task pool,
+/// and touching the VM there aborts the process the moment the scheduler picks a worker thread
+/// (`Attempted to access or drop non-send resource benilla_ui::script::UiScript`, a black screen
+/// and no crash dialog). So this reads the CVar alone, and the systems below — which may name the
+/// VM, because they are systems — answer "is the HUD actually up" from its frame's rects: no
+/// rects means every finger falls through to the mouse, which is what the glue screens want.
+fn layer_up(cvars: Option<Res<crate::cvars::Cvars>>) -> bool {
     crate::inilla::touch_device()
         && cvars.is_some_and(|c| c.flag("mobileInterface").unwrap_or(false))
-        && script.is_some_and(|s| s.frame_visible("BenillaMobileHud"))
 }
 
 /// Whether this module speaks for the pointer at all: on Android, which has no touch stack of its
@@ -57,8 +64,8 @@ fn layer_up(script: Option<NonSend<UiScript>>, cvars: Option<Res<crate::cvars::C
 ///
 /// The two never both replay a finger: iNilla's own handler feeds the engine only while the layer
 /// is down (`inilla::touch::hud_visible` returns false on the same reading).
-fn touch_owns(script: Option<NonSend<UiScript>>, cvars: Option<Res<crate::cvars::Cvars>>) -> bool {
-    cfg!(target_os = "android") || layer_up(script, cvars)
+fn touch_owns(cvars: Option<Res<crate::cvars::Cvars>>) -> bool {
+    cfg!(target_os = "android") || layer_up(cvars)
 }
 
 /// The stick's reach in root units, and the drag under which it holds nothing.
@@ -66,6 +73,9 @@ const STICK_RADIUS: f32 = 95.0;
 const STICK_DEAD: f32 = 22.0;
 /// A direction is held once it is within 67.5° of the drag.
 const STICK_EDGE: f32 = 0.38;
+/// Screen pixels a finger must travel before it is a drag rather than a tap. A touch screen reports
+/// a pixel or two of jitter on a still finger, so a bare `> 0` would make every tap a drag.
+const DRAG_SLOP: f32 = 8.0;
 /// Root units of finger travel per raw mouse unit the look session reads.
 const LOOK_GAIN: f32 = 1.6;
 /// Yards of zoom per root unit a pinch closes.
@@ -89,6 +99,19 @@ enum Role {
     Button,
 }
 
+/// One finger down: what it landed on, where it is, and whether it has travelled far enough to be
+/// a drag rather than a tap.
+struct Finger {
+    id: u64,
+    role: Role,
+    /// The last position, in window pixels.
+    last: Vec2,
+    /// Where it landed, in root units (y up) — the point a tap acts on.
+    start: Vec2,
+    /// Set once it travels past [`DRAG_SLOP`].
+    moved: bool,
+}
+
 #[derive(Default)]
 struct Pointer {
     /// The finger the mouse follows.
@@ -96,8 +119,8 @@ struct Pointer {
     at: Option<Vec2>,
     /// A tap that began and ended in one frame releases the next, so the press is seen first.
     release_next: bool,
-    /// Every finger down and its role, last position in window pixels.
-    roles: Vec<(u64, Role, Vec2)>,
+    /// Every finger down.
+    roles: Vec<Finger>,
     /// The stick's centre (root units), held from the press.
     stick_centre: Vec2,
     /// The two world fingers' last spread, for the pinch.
@@ -156,7 +179,7 @@ fn touch_to_mouse(
     let mut look = Vec2::ZERO;
     for touch in touches.read() {
         let ui = crate::ui_script::window_to_ui(height, touch.position);
-        let known = pointer.roles.iter().position(|r| r.0 == touch.id);
+        let known = pointer.roles.iter().position(|r| r.id == touch.id);
         if touch.phase == TouchPhase::Started && known.is_none() {
             let role = match &regions {
                 Some(r) if contains(&r.stick, ui) => {
@@ -187,16 +210,32 @@ fn touch_to_mouse(
                 }
                 _ => Role::Mouse,
             };
-            pointer.roles.push((touch.id, role, touch.position));
+            pointer.roles.push(Finger {
+                id: touch.id,
+                role,
+                last: touch.position,
+                start: ui,
+                moved: false,
+            });
             if role == Role::Look {
                 pointer.pinch = None;
             }
         }
-        let Some(i) = pointer.roles.iter().position(|r| r.0 == touch.id) else {
+        let Some(i) = pointer.roles.iter().position(|r| r.id == touch.id) else {
             continue;
         };
-        let (_, role, last) = pointer.roles[i];
-        pointer.roles[i].2 = touch.position;
+        let role = pointer.roles[i].role;
+        let start = pointer.roles[i].start;
+        let last = pointer.roles[i].last;
+        pointer.roles[i].last = touch.position;
+        // Slop is in screen pixels, not root units: how far a finger must go before it is a drag
+        // rather than a tap is a property of the finger, and it must not shrink on a small screen.
+        if (touch.position - last).length() > 0.0
+            && (touch.position - window_pos(height, start)).length() > DRAG_SLOP
+        {
+            pointer.roles[i].moved = true;
+        }
+        let dragged = pointer.roles[i].moved;
         let ended = matches!(touch.phase, TouchPhase::Ended | TouchPhase::Canceled);
         match role {
             Role::Stick => {
@@ -221,13 +260,13 @@ fn touch_to_mouse(
                 }
             }
             Role::Look => {
-                let looks = pointer.roles.iter().filter(|r| r.1 == Role::Look).count();
+                let looks = pointer.roles.iter().filter(|r| r.role == Role::Look).count();
                 if looks >= 2 {
                     let mut fingers = pointer
                         .roles
                         .iter()
-                        .filter(|r| r.1 == Role::Look)
-                        .map(|r| r.2);
+                        .filter(|r| r.role == Role::Look)
+                        .map(|r| r.last);
                     let (a, b) = (fingers.next(), fingers.next());
                     if let (Some(a), Some(b)) = (a, b) {
                         let spread = a.distance(b) / crate::ui_script::seam_scale(height);
@@ -241,8 +280,23 @@ fn touch_to_mouse(
                         }
                         pointer.pinch = Some(spread);
                     }
-                } else if touch.phase == TouchPhase::Moved {
+                } else if dragged && touch.phase == TouchPhase::Moved {
                     look += (touch.position - last) * LOOK_GAIN;
+                }
+                // A world finger that never travelled is a **tap on the world**: it becomes the
+                // mouse for that instant and clicks where it landed, which is how a player targets
+                // an NPC or a creature. Without this the world finger only ever drove the camera,
+                // and nothing in the world could be selected.
+                if ended && !dragged && looks <= 1 {
+                    let delta = pointer.at.map(|at| touch.position - at);
+                    moved.write(CursorMoved {
+                        window,
+                        position: touch.position,
+                        delta,
+                    });
+                    buttons.write(button(ButtonState::Pressed));
+                    pointer.at = Some(touch.position);
+                    pressed_now = true;
                 }
             }
             Role::Button => {}
@@ -278,8 +332,15 @@ fn touch_to_mouse(
         }
     }
     // A world drag turns the camera as a right-drag does: `MouselookStart`, which has no
-    // binding gate, holds the look session, and the drag is its motion.
-    let looking = pointer.roles.iter().filter(|r| r.1 == Role::Look).count() == 1;
+    // binding gate, holds the look session, and the drag is its motion. **Only a finger that has
+    // travelled**: starting the session on the press would let the first pixels of a tap turn the
+    // camera, and the tap's own click would then land on whatever the turned camera put under it.
+    let looking = pointer
+        .roles
+        .iter()
+        .filter(|r| r.role == Role::Look && r.moved)
+        .count()
+        == 1;
     if looking != pointer.looking {
         pointer.looking = looking;
         if let Some(s) = script.as_ref() {
@@ -294,6 +355,13 @@ fn touch_to_mouse(
     if pointer.at.is_some() {
         win.set_cursor_position(pointer.at);
     }
+}
+
+/// Root units back to window pixels: the inverse of [`crate::ui_script::window_to_ui`], for
+/// comparing a finger's travel against [`DRAG_SLOP`].
+fn window_pos(height: f32, ui: Vec2) -> Vec2 {
+    let s = crate::ui_script::seam_scale(height);
+    Vec2::new(ui.x * s, height - ui.y * s)
 }
 
 /// The directions a stick drag `d` (root units, y up) holds.

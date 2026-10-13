@@ -104,10 +104,13 @@
             local icon = Texture(button, file, "ARTWORK")
             icon:SetAllPoints(button)
             button.icon = icon
-            local border = Texture(button, "Interface\\Minimap\\MiniMap-TrackingBorder", "OVERLAY")
-            border:SetWidth(size * 1.7)
-            border:SetHeight(size * 1.7)
-            border:SetPoint("TOPLEFT", button, "TOPLEFT", -size * 0.12, size * 0.12)
+            -- Round and at 1:1; the tracking border below stood at 1.7x and showed its sawtooth.
+            local rim = Texture(button, "Interface\\Buttons\\WHITE8X8", "OVERLAY")
+            SetPortraitToTexture(rim, "Interface\\Buttons\\WHITE8X8")
+            rim:SetWidth(size * 1.14)
+            rim:SetHeight(size * 1.14)
+            rim:SetPoint("CENTER", button, "CENTER", 0, 0)
+            rim:SetVertexColor(0.05, 0.05, 0.05, 0.8)
             button:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square")
             button:GetHighlightTexture():SetBlendMode("ADD")
             button:SetScript("OnMouseDown", function() this.icon:SetVertexColor(0.7, 0.7, 0.7) end)
@@ -149,15 +152,24 @@
             ring:SetPoint("TOPLEFT", Hud, "TOPLEFT", x, -4)
             ring:RegisterForClicks("LeftButtonUp", "RightButtonUp")
             ring.unit = unit
+            -- The portrait is engine-masked to its inscribed circle (`SetPortraitToTexture`'s
+            -- `circular` flag), so it is the one round thing here that has no edge to clean up.
             local portrait = ring:CreateTexture(name .. "Portrait", "BACKGROUND")
-            portrait:SetWidth(RING * 0.74)
-            portrait:SetHeight(RING * 0.74)
+            portrait:SetWidth(RING * 0.96)
+            portrait:SetHeight(RING * 0.96)
             portrait:SetPoint("CENTER", ring, "LEFT", RING / 2, 0)
             ring.portrait = portrait
-            local border = Texture(ring, "Interface\\Minimap\\MiniMap-TrackingBorder", "ARTWORK")
-            border:SetWidth(RING * 1.62)
-            border:SetHeight(RING * 1.62)
-            border:SetPoint("TOPLEFT", ring, "TOPLEFT", -RING * 0.04, RING * 0.04)
+            -- The frame around it: two flat textures, both round and both at 1:1, so their edges
+            -- are the rasteriser's. `Interface\Minimap\MiniMap-TrackingBorder` used to sit here
+            -- at 2.4x (RING * 1.62 over a 128px art), which magnified its hand-drawn rim into the
+            -- hard sawtooth the mobile HUD showed.
+            local rim = ring:CreateTexture(name .. "Rim", "BACKGROUND")
+            SetPortraitToTexture(name .. "Rim", "Interface\\Buttons\\WHITE8X8")
+            rim:SetWidth(RING * 1.12)
+            rim:SetHeight(RING * 1.12)
+            rim:SetPoint("CENTER", portrait, "CENTER", 0, 0)
+            rim:SetVertexColor(0.05, 0.05, 0.05, 0.85)
+            portrait:SetDrawLayer("BORDER")
             ring.level = ring:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
             ring.level:SetPoint("BOTTOM", portrait, "BOTTOM", 0, -6)
             Resize(ring.level, 20)
@@ -238,8 +250,13 @@
         SetPortraitToTexture("BenillaMobileStickBase", "Interface\\Buttons\\WHITE8X8")
         stickBase:SetAllPoints(Stick)
         stickBase:SetVertexColor(0, 0, 0, 0.35)
-        local stickRing = Texture(Stick, "Interface\\Minimap\\MiniMap-TrackingBorder", "BORDER", 440, 440)
-        stickRing:SetPoint("TOPLEFT", Stick, "TOPLEFT", -26, 26)
+        -- Native scale, round, one flat texture: no magnified hand-drawn rim.
+        local stickRing = Stick:CreateTexture("BenillaMobileStickRing", "BORDER")
+        SetPortraitToTexture("BenillaMobileStickRing", "Interface\\Buttons\\WHITE8X8")
+        stickRing:SetWidth(250)
+        stickRing:SetHeight(250)
+        stickRing:SetPoint("CENTER", Stick, "CENTER", 0, 0)
+        stickRing:SetVertexColor(1, 0.82, 0.3, 0.35)
         local knob = Stick:CreateTexture("BenillaMobileStickKnob", "ARTWORK")
         SetPortraitToTexture("BenillaMobileStickKnob", "Interface\\Buttons\\WHITE8X8")
         knob:SetWidth(110)
@@ -306,8 +323,10 @@
             frame:EnableMouse(true)
             local icon = Texture(frame, file, "ARTWORK")
             icon:SetAllPoints(frame)
-            local border = Texture(frame, "Interface\\Minimap\\MiniMap-TrackingBorder", "OVERLAY", size * 1.7, size * 1.7)
-            border:SetPoint("TOPLEFT", frame, "TOPLEFT", -size * 0.12, size * 0.12)
+            local rim = Texture(frame, "Interface\\Buttons\\WHITE8X8", "OVERLAY", size * 1.14, size * 1.14)
+            SetPortraitToTexture(rim, "Interface\\Buttons\\WHITE8X8")
+            rim:SetPoint("CENTER", frame, "CENTER", 0, 0)
+            rim:SetVertexColor(0.05, 0.05, 0.05, 0.8)
             return frame
         end
         local JumpButton = EngineButton("BenillaMobileJump", "Interface\\Icons\\Ability_Rogue_Sprint", 116)
