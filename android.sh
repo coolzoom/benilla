@@ -7,10 +7,12 @@
 #   ./android.sh 3          _work/out/benilla.apk (NativeActivity, no Java code)
 #   ./android.sh 4          adb install, benilla.env, adb reverse, game data if missing, launch
 #   ./android.sh 5          1 to 4
+#   ./android.sh 6          _work/out/benilla.xapk: the APK and every Data MPQ, for a phone's XAPK installer
+#   ./android.sh 7          install an XAPK over adb, as an XAPK installer does
 #   ./android.sh data       adb push the WoW Data folder (several GB) on its own
 #   ./android.sh install    and `run`: the two halves of 4
-#   ./android.sh xapk       _work/out/benilla.xapk: the APK and every Data MPQ, for a phone's XAPK installer
-#   ./android.sh xapk-install [file]   install an XAPK over adb, as an XAPK installer does
+#   ./android.sh xapk       same as 6
+#   ./android.sh xapk-install [file]   same as 7; an optional path overrides _work/out/benilla.xapk
 #
 # Switches (environment):
 #   ANDROID_PROFILE=release|ship|play   cargo profile (default release)
@@ -390,7 +392,7 @@ xapk() {
     unzip -tq "$out/benilla.xapk" >/dev/null || die "benilla.xapk 校验失败"
     rm -rf "$stage"
     say "XAPK: $out/benilla.xapk ($(du -h "$out/benilla.xapk" | cut -f1))"
-    say "手机上用 XAPK 安装器（APKPure、XAPK Installer 等）打开即可安装；或电脑上 ./android.sh xapk-install"
+    say "手机上用 XAPK 安装器（APKPure、XAPK Installer 等）打开即可安装；或在选单里选 7（./android.sh 7）"
 }
 
 # Install an XAPK the way an XAPK installer does: the APK, then each expansion into the OBB folder.
@@ -593,15 +595,15 @@ all() {
 }
 
 usage() {
-    echo "用法: ./android.sh [1|2|3|4|5|data]"
+    echo "用法: ./android.sh [1|2|3|4|5|6|7|data]"
     echo "  1  安装环境（JDK 到 _work/，Android SDK、NDK 到 $ANDROID_HOME，Rust 安卓目标）"
     echo "  2  编译（crates/benilla-android，arm64-v8a）"
     echo "  3  打包 APK（_work/out/benilla.apk）"
     echo "  4  推送到设备并运行（adb install、benilla.env、游戏数据、logcat）"
     echo "  5  全部（1 到 4）"
+    echo "  6  打包 XAPK（_work/out/benilla.xapk，含全部游戏数据），手机上用 XAPK 安装器安装"
+    echo "  7  通过 adb 安装 XAPK"
     echo "  data  只推送游戏数据"
-    echo "  xapk  打包含全部游戏数据的 XAPK（_work/out/benilla.xapk），手机上用 XAPK 安装器安装"
-    echo "  xapk-install [文件]  通过 adb 安装 XAPK"
     echo "环境变量: ANDROID_PROFILE=release|ship|play  ANDROID_DEV=0  ANDROID_SERIAL=<id>  ANDROID_REVERSE=0"
 }
 
@@ -616,13 +618,15 @@ menu() {
     echo "  3) 打包 APK"
     echo "  4) 推送到设备并运行"
     echo "  5) 全部（1 到 4）"
+    echo "  6) 打包 XAPK（含游戏数据）"
+    echo "  7) 通过 adb 安装 XAPK"
     echo "  q) 退出"
-    printf '选择 [1/2/3/4/5/q]: '
+    printf '选择 [1/2/3/4/5/6/7/q]: '
     read -r choice || exit 0
     case "$choice" in
-    [1-5]) bash "$0" "$choice" || echo "步骤 $choice 失败。" ;;
+    [1-7]) bash "$0" "$choice" || echo "步骤 $choice 失败。" ;;
     q | Q) exit 0 ;;
-    *) echo "请输入 1、2、3、4、5 或 q。" ;;
+    *) echo "请输入 1、2、3、4、5、6、7 或 q。" ;;
     esac
 }
 
@@ -632,10 +636,10 @@ case "${1:-}" in
 3 | package) package ;;
 4 | deploy) deploy ;;
 5 | all) all ;;
+6 | xapk) xapk ;;
+7 | xapk-install) xapk_install "${2:-}" ;;
 install) install_apk ;;
 data) push_data ;;
-xapk) xapk ;;
-xapk-install) xapk_install "${2:-}" ;;
 run) run_app ;;
 -h | --help) usage ;;
 "")
