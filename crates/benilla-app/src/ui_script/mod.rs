@@ -18,9 +18,14 @@ mod content;
 pub(crate) mod extract;
 /// The stock glue screens behind `WOW_GLUE_STOCK=1`.
 pub(crate) mod glue;
+/// The stock create screen's catalog off the host's DBC catalogs.
+pub(crate) mod glue_create;
 /// `CGlueMgr`'s screen states over the native login, for the stock glue screens.
 pub(crate) mod glue_mgr;
+pub(crate) mod glue_scene;
 mod input;
+/// The server alert's fetch and `LaunchURL`'s browser, for the stock glue screens.
+pub(crate) mod server_alert;
 #[cfg(test)]
 pub(crate) use input::feed_keys;
 #[cfg(test)]
@@ -39,7 +44,7 @@ mod session;
 /// The feed gate: a UI feed's input-side early-out, audited by `WOW_FEED_GATE_CHECK=1`.
 pub(crate) mod gate;
 
-pub(crate) use session::VmMemo;
+pub(crate) use session::{VmMemo, WindowMemo};
 
 // Not test-only: the addon harness loads the whole shipped interface under each addon.
 pub(crate) use manifest::default_bindings;
@@ -298,7 +303,7 @@ impl Plugin for UiScriptPlugin {
         crate::shutdown::on_app_exit(app, shutdown_on_exit.into_configs());
         app.insert_resource(UiScaleCvar(default_ui_scale()))
             .insert_resource(glue::GlueStock::from_env())
-            .init_resource::<glue_mgr::GlueMgr>()
+            .init_non_send_resource::<glue_mgr::SharedGlueMgr>()
             .init_resource::<UiAutoScaleCache>()
             .init_resource::<UiFrameCost>()
             .init_resource::<crate::bindings::WheelNotches>()
@@ -338,9 +343,8 @@ impl Plugin for UiScriptPlugin {
                 end_ui_session,
             )
             // `init_` here and in `UiUnitPlugin`: either plugin may be built alone in a test.
-            .init_resource::<LeavingWorldArmed>()
-            .add_message::<WorldLeaveSweepMessage>()
-            .add_systems(Update, lifecycle::arm_leaving_world_on_self_create)
+            .init_world_leave_sweep()
+            .add_systems(Update, sweep::arm_leaving_world_on_self_create)
             // A queued `ReloadUI()` runs in `PreUpdate`, a frame after its drain (the reference's
             // deferral, `0x495590`) and before every `Update` seed or feed.
             .init_resource::<ReloadUiPending>()
@@ -432,9 +436,19 @@ fn arbitrate_pointer_over_ui(
 mod lifecycle;
 pub(crate) use lifecycle::{
     end_ui_session, ingame_ui_up, run_pending_reload, setup_script, strings_vm, AddOnIdentity,
-    LeaveWorldSweep, LeavingWorldArmed, PendingEntryUiLoad, ReloadUiPending,
-    WorldLeaveSweepMessage,
+    PendingEntryUiLoad, ReloadUiPending,
 };
+/// The leave-world sweep `0x490a80`: its latch, its schedule and its legs' order.
+mod sweep;
+#[cfg(test)]
+pub(crate) use sweep::test_support as sweep_test;
+#[cfg(test)]
+pub(crate) use sweep::WorldLeaveSweep;
+pub(crate) use sweep::{
+    run_leave_world_sweep, sweep_on_worldport, LeavingWorldArmed, SweepApp, SweepLeg, SweptWorlds,
+};
+#[cfg(test)]
+mod sweep_tests;
 // Test-only: other modules' tests consume these, and a plain re-export would warn unused.
 #[cfg(test)]
 pub(crate) use lifecycle::load_ingame_ui_on_world_entry;
@@ -611,6 +625,7 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<VmMemo<
                     count,
                     // The seed's only item slot is the food stack, which is consumable.
                     consumable: kind == 0x80,
+                    use_spell: None,
                 }),
             );
             // Server-less a slot has no usable state; a live bar's resting state is usable.
@@ -838,6 +853,9 @@ mod uiparent_tests;
 
 #[cfg(test)]
 mod trainer_tests;
+
+#[cfg(test)]
+mod auction_tests;
 
 #[cfg(test)]
 mod bank_tests;

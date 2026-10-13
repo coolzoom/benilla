@@ -298,6 +298,14 @@ pub const TOOLTIP_FADE_SECS: f32 = 2.0;
 /// A wrap-flagged line's width, pinned when it is appended; the reference's column is untraced.
 pub const TOOLTIP_WRAP_WIDTH: f32 = 260.0;
 
+/// One frame's advance of a model pane's scene clock in whole milliseconds: `elapsed · 1000`
+/// truncated toward zero with no `+0.5` (`0x76d846`, then `__ftol` `0x40a2b0`), where the world's
+/// clock rounds (`0x483659`), so each frame's sub-millisecond remainder is dropped with no carry.
+/// A negative or NaN `elapsed` advances nothing.
+pub fn pane_clock_step_ms(elapsed: f32) -> u64 {
+    (elapsed * 1000.0).trunc().max(0.0) as u64
+}
+
 /// A model pane's scene: the `CSimpleModel` (`0x76c8e0`) members every model kind carries, read
 /// and written by `Model`'s 23 methods (table `0x878948`); the render is the app's.
 #[derive(Clone, Debug, PartialEq)]
@@ -355,6 +363,15 @@ pub struct ModelState {
     /// and its layer-2 paint callback (`0x46fad0`, registered by `0x46fa90`) brackets the model
     /// paint `0x76d240` with the full-screen-effect pass pair `0x6cd890`/`0x6cda70`.
     pub ffx: bool,
+    /// The scene's fill callback is the select screen's (`0x472150`, installed by
+    /// `SetCharSelectBackground` at `0x472144`) in place of the fog callback `SetModel` installs
+    /// (`0x76cd96` → `0x76d680`): the scene draws unfogged whatever the fog fields hold. The
+    /// callback rides the model instance, so the next `SetModel` or `ClearModel` drops it.
+    pub select_fill: bool,
+    /// The number of the instance the last `SetModel` made: `0x76cce0` builds a new one on every
+    /// call (`0x76ccf5`-`0x76cd0d`), its scene starting over, even for the file it held. 0 for
+    /// none.
+    pub instance: u64,
 }
 
 /// A model pane's armed fog, all the renderer needs ([`ModelState::armed_fog`]).
@@ -375,9 +392,10 @@ impl ModelFog {
     }
 }
 
-/// A model pane's embedded `CGLight` (`+0x324`), its only light (`0x76d680`): off on a plain
-/// `<Model>` until Lua enables it, so a lit batch draws black (`0x71bf90`), and on for a
-/// `PlayerModel` (ctor `0x505680`). Colours are stored times their intensity.
+/// A model pane's embedded `CGLight` (`+0x324`), the light `0x76d680` adds to its file's own
+/// (`0x718960`): off on a plain `<Model>` until Lua enables it, so a file with no lights draws
+/// black (`0x71bf90`), and on for a `PlayerModel` (ctor `0x505680`). Colours are stored times
+/// their intensity.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ModelLight {
     /// `+0x60`: set by a nonzero `SetLight` (`0x76e1e0`) first argument; `SetLight(0, …)` is inert.
@@ -429,6 +447,8 @@ impl Default for ModelState {
             fog_near: 0.0,
             fog_far: 1.0,
             ffx: false,
+            select_fill: false,
+            instance: 0,
         }
     }
 }
@@ -531,6 +551,7 @@ impl ModelState {
         self.icon = None;
         self.armed = None;
         self.pending_seed = true;
+        self.select_fill = false;
         if let Some(facts) = facts {
             self.seed_from_facts(facts);
         }
@@ -543,6 +564,7 @@ impl ModelState {
         self.icon = None;
         self.armed = None;
         self.pending_seed = false;
+        self.select_fill = false;
     }
 
     /// `SetSequence`/`SetSequenceTime` (`0x7121a0`): interrupts what plays, with no
@@ -594,6 +616,16 @@ impl ModelState {
             near: self.fog_near,
             far: self.fog_far,
         })
+    }
+
+    /// The fog the scene draws with: the armed fog under the fog callback `SetModel` installs
+    /// (`0x76d680`), none under the select screen's ([`Self::select_fill`]).
+    pub fn scene_fog(&self) -> Option<ModelFog> {
+        if self.select_fill {
+            None
+        } else {
+            self.armed_fog()
+        }
     }
 
     /// `SetCamera` by raw index (`0x76cec0`): deferred until the facts are known, then installed

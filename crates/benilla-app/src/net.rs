@@ -121,7 +121,9 @@ impl Plugin for NetPlugin {
             .add_message::<CharListMessage>()
             .add_message::<WorldAuthMessage>()
             .add_message::<RosterFailedMessage>()
+            .add_message::<AddonInfoMessage>()
             .add_message::<CharActionResultMessage>()
+            .add_message::<CharRenameMessage>()
             .add_message::<CharacterLoginFailedMessage>()
             .add_message::<EnteredWorldMessage>()
             .add_message::<WorldEnterCascadeMessage>()
@@ -474,6 +476,9 @@ pub(crate) enum CharRequest {
     Create(benilla_protocol::CharCreateReq),
     /// Delete a character by guid (`CMSG_CHAR_DELETE`), then stay parked at select.
     Delete(u64),
+    /// Rename a character the server flagged for it (`CMSG_CHAR_RENAME`), then stay parked at
+    /// select with the reply.
+    Rename { guid: u64, name: String },
     /// Select's Back: drop the session and return to the pre-logon park.
     Abandon,
     /// Fetch the roster again (`CMSG_CHAR_ENUM`) on the parked session, then stay parked with
@@ -698,12 +703,53 @@ pub(crate) fn send_query_time(
     }
 }
 
-/// Our `(flags, standing)` per slot, indexed by `Faction.dbc`'s `reputationIndex`. The standing
-/// excludes the DBC race/class base, which consumers add before ranking. Filled by
-/// `SMSG_INITIALIZE_FACTIONS`, kept current by `SMSG_SET_FACTION_STANDING` (which also reveals)
-/// and `SMSG_SET_FACTION_VISIBLE`. Flag bit `0x08` marks a pane header.
+/// Our reputation state: the `(flags, standing)` per slot and the forced-reaction table.
+///
+/// `slots` is indexed by `Faction.dbc`'s `reputationIndex`. The standing excludes the DBC
+/// race/class base, which consumers add before ranking. Filled by `SMSG_INITIALIZE_FACTIONS`, kept
+/// current by `SMSG_SET_FACTION_STANDING` (which also reveals) and `SMSG_SET_FACTION_VISIBLE`.
+/// Flag bit `0x08` marks a pane header.
+///
+/// `forced` is `SMSG_SET_FORCED_REACTIONS` (`0x4d59a0`): `(Faction.dbc id, reaction rank)` per
+/// faction a `SPELL_AURA_FORCE_REACTION` aura forces, which answers with that rank whatever its
+/// templates or our standing say. Both halves live on one resource so a change to either wakes the
+/// unit feed and the questgiver-marker re-query that read reactions.
 #[derive(Resource, Default)]
-pub(crate) struct Reputations(pub(crate) Vec<(u8, i32)>);
+pub(crate) struct Reputations {
+    pub(crate) slots: Vec<(u8, i32)>,
+    pub(crate) forced: Vec<(u32, u32)>,
+    /// How many forced tables have arrived. The reference's handler fires `UNIT_FACTION` on every
+    /// arrival, a resend of the same table included, so a feed counts arrivals, not table diffs.
+    forced_arrivals: u64,
+}
+
+impl Reputations {
+    /// A store holding only `slots`, with nothing forced.
+    #[cfg(test)]
+    pub(crate) const fn from_slots(slots: Vec<(u8, i32)>) -> Self {
+        Self {
+            slots,
+            forced: Vec::new(),
+            forced_arrivals: 0,
+        }
+    }
+
+    /// `SMSG_SET_FORCED_REACTIONS`: the table replaces the last whole (`0x4d59a0`).
+    pub(crate) fn set_forced(&mut self, table: Vec<(u32, u32)>) {
+        self.forced = table;
+        self.forced_arrivals += 1;
+    }
+
+    /// Drops the table: the reference's teardown zeroes the count (`0x4d5419`).
+    pub(crate) fn clear_forced(&mut self) {
+        self.forced.clear();
+    }
+
+    /// The tables that have arrived so far.
+    pub(crate) fn forced_arrivals(&self) -> u64 {
+        self.forced_arrivals
+    }
+}
 
 /// The hearthstone bind point (`SMSG_BINDPOINTUPDATE`): the AreaTable id the tooltip's `$z`
 /// token names.
@@ -2132,12 +2178,28 @@ pub(crate) struct RosterFailedMessage {
     pub(crate) epoch: u64,
 }
 
+/// The world session read `SMSG_ADDON_INFO` (the handler `0x5b4260`): the addons it hid from the
+/// Lua index space, at the point the reference's listener fires `ADDON_LIST_UPDATE`
+/// (`0x5b4290` → `0x5ab2f0`). [`AddonInfoReply`] holds the same records for a screen built later.
+#[derive(Message)]
+pub(crate) struct AddonInfoMessage {
+    pub(crate) records: Vec<benilla_protocol::messages::AddonRecord>,
+}
+
 /// A character create or delete result; a refreshed [`CharListMessage`] precedes a success.
 /// `code` is the raw `WorldResult` byte.
 #[derive(Message, Clone, Copy)]
 pub(crate) struct CharActionResultMessage {
     pub(crate) action: benilla_protocol::CharAction,
     pub(crate) code: u8,
+}
+
+/// `SMSG_CHAR_RENAME`: the result byte (0 success) and, when the reply carried them, the renamed
+/// character's guid and new name.
+#[derive(Message, Clone)]
+pub(crate) struct CharRenameMessage {
+    pub(crate) result: u8,
+    pub(crate) renamed: Option<(u64, String)>,
 }
 
 /// `SMSG_CHARACTER_LOGIN_FAILED`: the picked character was refused. `result` is the raw reason,
@@ -2166,7 +2228,7 @@ pub(crate) struct WorldEnterCascadeMessage;
 /// not answer. A resource, since it must exist before the world-entry UI load runs any addon;
 /// rewritten on every login from the reply its link got.
 #[derive(Resource, Default)]
-pub(crate) struct AddonInfoReply(pub(crate) Option<Vec<String>>);
+pub(crate) struct AddonInfoReply(pub(crate) Option<Vec<benilla_protocol::messages::AddonRecord>>);
 
 /// `SMSG_TRIGGER_CINEMATIC`: a `CinematicSequences.dbc` id; [`crate::cinematic`] plays and acks it.
 #[derive(Message)]

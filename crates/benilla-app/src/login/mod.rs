@@ -54,8 +54,23 @@ impl Plugin for LoginPlugin {
         app.init_resource::<LoginIntent>()
             .init_resource::<LoginForm>()
             .add_message::<GlueLogin>()
-            .add_systems(OnEnter(ClientState::Login), enter_login)
-            .add_systems(OnExit(ClientState::Login), screen::exit_login)
+            .add_message::<crate::ui_script::server_alert::LaunchUrl>()
+            .add_message::<crate::ui_script::server_alert::LaunchAddonUrl>()
+            .add_systems(
+                OnEnter(ClientState::Login),
+                (
+                    enter_login,
+                    // Under the stock glue screens their own feeder drives the booth.
+                    show_main_menu.run_if(crate::ui_script::glue::native_glue),
+                ),
+            )
+            .add_systems(
+                OnExit(ClientState::Login),
+                (
+                    screen::exit_login,
+                    screen::clear_login_scene.run_if(crate::ui_script::glue::native_glue),
+                ),
+            )
             .add_systems(
                 Update,
                 (
@@ -67,6 +82,17 @@ impl Plugin for LoginPlugin {
                         crate::ui_script::glue_mgr::drive_glue_mgr
                             .after(crate::ui_script::UiInput)
                             .after(crate::realm_select::RealmSelectSet)
+                            .run_if(crate::ui_script::glue::stock_glue),
+                        // Off the roster and the screen the manager and the tick just moved.
+                        crate::ui_script::glue_scene::feed_stock_glue_preview
+                            .run_if(crate::ui_script::glue::stock_glue)
+                            .in_set(crate::portrait::GluePreviewFeed),
+                        crate::ui_script::server_alert::open_launched
+                            // Reads only its message, so no state orders it but the sets.
+                            .after(benilla_world::schedule::WorldStage::Stream)
+                            .run_if(crate::ui_script::glue::stock_glue),
+                        crate::ui_script::server_alert::open_addon_launched
+                            .after(benilla_world::schedule::WorldStage::Stream)
                             .run_if(crate::ui_script::glue::stock_glue),
                         answer_glue,
                         drive_policy,
@@ -209,6 +235,10 @@ pub(crate) enum GlueLogin {
     Disconnect,
     /// `QuitGame` (`0x46cea0` → `0x401560(0)`): the process ends, with no grace for a sound.
     Quit,
+    /// `CLoginMgr::Cancel` (`0x5b3320`) on a logon that failed: the realmd link closes if one is
+    /// open (`[login+5]`, `0x5b3323`; only the IO thread's logon park holds one), and nothing
+    /// else, so the credentials and an unattended run's paced resubmit stay.
+    CloseLink,
 }
 
 /// The glue manager's asks: a submit as the screen's own Login press makes it (the account saving
@@ -243,6 +273,11 @@ pub(crate) fn answer_glue(
                         let _ = pick.0.send(crate::net::CharRequest::Abandon);
                     }
                     commands.set_state(ClientState::Login);
+                }
+            }
+            GlueLogin::CloseLink => {
+                if let Some(realm) = realm.as_deref() {
+                    let _ = realm.0.send(crate::net::RealmRequest::Close);
                 }
             }
             GlueLogin::Quit => {
@@ -357,9 +392,8 @@ fn world_refusal_text(strings: &GlueStrings, code: u8) -> &str {
         m::AUTH_ALREADY_LOGGING_IN => ("AUTH_ALREADY_LOGGING_IN", "Already Logging In"),
         m::AUTH_LOGIN_SERVER_NOT_FOUND => ("AUTH_LOGIN_SERVER_NOT_FOUND", "Invalid Login Server"),
         // All but `AUTH_ALREADY_ONLINE` below are the rows of the client's `OKAY_WITH_URL` table
-        // (`0x803740`). Deviation: no URL button, because `LaunchURL` is a shell-out benilla does
-        // not make and its whitelist (`0x85cc34`) names only Blizzard domains that no longer
-        // serve these pages.
+        // (`0x803740`). Deviation: no URL button on the native screen, because `LaunchURL`'s
+        // whitelist (`0x85cc34`) names only Blizzard domains that no longer serve these pages.
         m::AUTH_BANNED => (
             "AUTH_BANNED",
             "This account has been banned for violating the Terms of Use Agreement",
@@ -761,8 +795,8 @@ impl LoginForm {
 struct QuitArm(Option<f32>);
 
 /// `AccountLogin_OnShow`: prefill the saved account, clear the password, focus the first empty
-/// box, check Remember when a name is saved; then show the `UI_MainMenu` scene.
-fn enter_login(mut form: ResMut<LoginForm>, mut preview: ResMut<GluePreview>) {
+/// box, check Remember when a name is saved.
+fn enter_login(mut form: ResMut<LoginForm>) {
     let saved = load_saved_account();
     form.save = !saved.is_empty();
     form.focus = if saved.is_empty() {
@@ -776,9 +810,16 @@ fn enter_login(mut form: ResMut<LoginForm>, mut preview: ResMut<GluePreview>) {
     // remembered name is typed over.
     let focus = form.focus;
     form.focus(focus);
+}
+
+/// The native login's scene, `AccountLogin.xml`'s `ModelFFX`: `UI_MainMenu` under its fog.
+fn show_main_menu(mut preview: ResMut<GluePreview>) {
     preview.scene = Some(GlueScene::MainMenu);
     preview.look = None;
     preview.yaw = 0.0;
+    preview.fog = Some(GlueScene::MainMenu.stock_fog());
+    // `AccountLogin`'s OnShow (`0x46fa60`).
+    preview.shown = preview.shown.wrapping_add(1);
 }
 
 /// The screen's input: typing, Tab, Enter submits, Esc quits (an open dialog takes it first),
@@ -1565,6 +1606,49 @@ mod tests {
             );
             assert!(rx.try_recv().is_err());
         }
+    }
+
+    /// Under the stock glue an unattended run's transport failure is still resubmitted: the
+    /// logon arm's cancel (`0x46bbbf` → `0x5b3320`) closes only a link that is open and keeps the
+    /// credentials and the paced resubmit.
+    #[test]
+    fn the_glue_arms_cancel_keeps_an_unattended_resubmit() {
+        let (mut app, requests) = policy_app();
+        let (realm_tx, realm_rx) = crossbeam_channel::unbounded();
+        app.insert_resource(crate::net::RealmChoice(realm_tx.into()))
+            .insert_resource(State::new(ClientState::Login))
+            .add_message::<GlueLogin>()
+            .add_message::<AppExit>()
+            .add_systems(Update, answer_glue.after(drive_policy));
+        {
+            let mut intent = app.world_mut().resource_mut::<LoginIntent>();
+            intent.creds = Some(("probe1".into(), "secret".into()));
+            intent.in_flight = true;
+        }
+        app.world_mut().write_message(LoginFailedMessage {
+            refusal: None,
+            reason: "connection refused".into(),
+            terminal: false,
+            dial: None,
+        });
+        // The arm's cancel and its dialog's press, as the glue manager asks them.
+        app.world_mut().write_message(GlueLogin::CloseLink);
+        app.world_mut().write_message(GlueLogin::CloseLink);
+        app.update();
+        assert!(matches!(
+            realm_rx.try_recv(),
+            Ok(crate::net::RealmRequest::Close)
+        ));
+        {
+            let intent = app.world().resource::<LoginIntent>();
+            assert!(intent.creds.is_some(), "the credentials stay");
+            assert_eq!(intent.retry_at, Some(RETRY_DELAY_SECS), "and the resubmit");
+        }
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(RETRY_DELAY_SECS));
+        app.update();
+        assert_eq!(requests.try_recv().expect("resubmitted").user, "probe1");
     }
 
     /// An unattended run still reconnects on a lost session; the verdict rides the message.

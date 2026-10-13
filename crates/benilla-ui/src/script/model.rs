@@ -92,9 +92,10 @@ pub(crate) struct Model {
     pub(crate) addons: Vec<super::addon::AddOnInfo>,
     /// The Lua index space into `addons`, a title-sorted, hidden-filtered list (`0x51da70`).
     pub(crate) addon_index: Vec<usize>,
-    /// Lowercased names `SMSG_ADDON_INFO` marked `status = 2`; `None` until the reply arrives, and
-    /// until then `GetNumAddOns()` is 0, as in the reference (`[0xbe1b90]`, reset at `0x51fad1`).
-    pub(crate) addon_info_hidden: Option<Vec<String>>,
+    /// The `SMSG_ADDON_INFO` records, `None` until the reply arrives, and until then
+    /// `GetNumAddOns()` is 0, as in the reference (`[0xbe1b90]`, reset at `0x51fad1`). Kept so a
+    /// registry seated after it (world entry's) takes the same state.
+    pub(crate) addon_reply: Option<Vec<super::addon::AddonReply>>,
     /// The current character's enable hash, which every enable verb writes through and the
     /// shutdown writer (`0x490c88` into `0x51ef20`) saves only while dirty.
     pub(crate) addon_enable: super::EnableHash,
@@ -227,6 +228,8 @@ pub(crate) struct Model {
     pub(crate) link_buttons: HashMap<FrameHandle, Vec<FrameHandle>>,
     /// Region visuals (texture, colour, text) and layout (anchors, size, justify).
     pub(crate) region_data: HashMap<RegionHandle, RegionData>,
+    /// The textures the regions' slots hold, with their creation stamps ([`super::texel`]).
+    pub(crate) texels: super::texel::Texels,
     /// Each frame's backdrop plate (`<Backdrop>` or `SetBackdrop`, the client's `frame+0x1ac`):
     /// its spec and the nine Texture regions it built.
     pub(crate) backdrops: HashMap<FrameHandle, backdrop::Installed>,
@@ -270,6 +273,8 @@ pub(crate) struct Model {
     pub(crate) model_facts: HashMap<String, std::sync::Arc<crate::widget::ModelFileFacts>>,
     /// Model files still waiting for their facts, for the host to load; deduplicated.
     pub(crate) model_facts_wanted: Vec<String>,
+    /// The model instances `SetModel` has made in this state, the last one's number.
+    pub(crate) model_instances: u64,
     /// Event name to its frames in registration order, never a set: `SignalEvent` (`0x703e50`)
     /// dispatches in that order across frames. Re-registering keeps a frame's position.
     pub(crate) event_to_frames: HashMap<String, Vec<FrameHandle>>,
@@ -423,8 +428,13 @@ pub(crate) struct Model {
     /// The recruitment auto-join latch `[0x843608]`: 0 `STANDARD`, 1 `AUTO` (`0x49ea70` maps any
     /// other word to 1). Boots at 1, as the reference writes `AUTO` for an untouched option.
     pub(crate) guild_recruitment_mode: u8,
-    /// Any `SetGuildRecruitmentMode(1)`, even unchanged: the reference runs the cascade `0x49ea90`.
+    /// A `SetGuildRecruitmentMode(1)` whose cascade could not act: the run stays owed
+    /// (`[0xb6e5e4]`) for the app's retry.
     pub(crate) guild_recruitment_cascade: bool,
+    /// What the cascade `0x49ea90` would do now, pushed by the app.
+    pub(crate) guild_recruitment_plan: super::channel::RecruitmentPlan,
+    /// The cascade's joins and leaves since the last drain, for the app's wire and slot halves.
+    pub(crate) guild_recruitment_runs: Vec<super::channel::RecruitmentRun>,
     /// Lua changed the recruitment mode: the chat cache's dirty signal.
     pub(crate) guild_recruitment_changed: bool,
     /// `DoEmote` calls queued.
@@ -641,6 +651,9 @@ pub(crate) struct Model {
     /// `HasFullControl`, the reference's `[0xb4b3e4]`: set by `SMSG_CLIENT_CONTROL_UPDATE` for the
     /// player, boots 1, and every cast, item and cursor gate refuses at 0.
     pub(crate) player_control: bool,
+    /// The on-use spells that pass the item dispatcher's control gate without control of the
+    /// character (`0x5d8ec0`-`0x5d8f6a`), fed by the app.
+    pub(crate) control_bypass: HashSet<u32>,
     /// One `CMSG_PET_SET_ACTION` per entry, its one or two `(position, packed word)` pairs: the
     /// server tells the forms apart by body size, so a move's two pairs must not be flattened.
     pub(crate) pet_set_actions: Vec<Vec<(u32, u32)>>,
@@ -658,11 +671,10 @@ pub(crate) struct Model {
     pub(crate) has_key: bool,
     /// What the cursor carries; nothing moves locally, the server's updates settle the bags.
     pub(crate) cursor: Option<cursor::CursorPayload>,
-    /// The action bar's drop grid: shown on the cursor's empty-to-held edge for any payload but a
-    /// pet action or a vendor row (mode 5; the grab setter `0x4950f0` shows it for mode 7 only).
-    pub(crate) cursor_grid_shown: bool,
-    /// The pet bar's grid, lit only by a pet-action pickup (`0x494f28`); never both grids at once.
-    pub(crate) pet_grid_shown: bool,
+    /// The cursor's one grid latch, `[0xb4da24]`: set by a setter that showed a bar's drop grid,
+    /// cleared by `ClearCursor`'s tail, which hides the pet bar's for a held pet action and the
+    /// action bar's otherwise (`0x49529b`).
+    pub(crate) cursor_grid: bool,
     /// The world pick under the cursor (`[this+0x350]`): a world click drops no payload on an
     /// object, only an item on terrain, and anything over nothing.
     pub(crate) world_pick: cursor::WorldPick,
@@ -690,6 +702,8 @@ pub(crate) struct Model {
     pub(crate) ui_cursor_dirty: bool,
     /// `AutoEquipCursorItem`'s `(bag, slot)` sources, sent as `CMSG_AUTOEQUIP_ITEM`.
     pub(crate) container_autoequips: Vec<(i64, u32)>,
+    /// `AutoEquipCursorItem`'s bind-on-equip questions, `(bag, slot, guid)`: the item stays held.
+    pub(crate) container_equip_asks: Vec<(i64, u32, u64)>,
     /// `PutItemInBag` and `PutItemInBackpack` stores, sent as `CMSG_AUTOSTORE_BAG_ITEM`, or
     /// `CMSG_SPLIT_ITEM` for a split stack.
     pub(crate) bag_autostores: Vec<container::BagAutoStore>,
@@ -760,8 +774,11 @@ pub(crate) struct Model {
     pub(crate) taxi_close: bool,
     pub(crate) taxi_riding: bool,
 
-    /// The open tradeskill window's recipes.
+    /// The tradeskill window's recipes, kept past a close as the reference's list (`[0xbde054]`)
+    /// is, until the next open rebuilds it.
     pub(crate) trade_skill: Option<tradeskill::TradeSkillState>,
+    /// The window is open (`[0xbde040]`), which a close alone zeroes (`0x4fc870`).
+    pub(crate) trade_skill_open: bool,
     /// `DoTradeSkill` calls, `(spell id, count)`.
     pub(crate) trade_skill_dos: Vec<(u32, u32)>,
     /// The 1-based selection, 0 for none, carried across a re-push by the recipe's spell id.
@@ -781,12 +798,18 @@ pub(crate) struct Model {
     pub(crate) trade_skill_last_line: u32,
     /// The selected recipe's spell id (`0xbde044`), which carries it across reopen and re-push.
     pub(crate) trade_skill_selected_spell: u32,
-    /// A filter or subclass collapse changed: `TRADE_SKILL_UPDATE` (`0x13a`) is owed this frame, as
-    /// the client fires it inside the call (`0x4fd710`/`0x4fd730`/`0x4fd750`, `0x4fd180`).
-    pub(crate) trade_skill_touched: bool,
+    /// The Create All repeat's spell (`0xbde05c`), armed by a `DoTradeSkill` of more than one
+    /// (`0x4fd770`) and disarmed, with its `UPDATE_TRADESKILL_RECAST`, by the close (`0x4fd790`).
+    pub(crate) trade_skill_repeat_spell: u32,
+    /// The Create All count (`0xbde060`), set with the spell and counted down by each of our own
+    /// casts of it (`0x4fd7ca`); a disarm leaves it.
+    pub(crate) trade_skill_repeat_count: u32,
 
-    /// The open craft window's recipes.
+    /// The craft window's recipes, kept past a close as the reference's list (`[0xbdcfc8]`) is,
+    /// until the next open rebuilds it.
     pub(crate) craft: Option<craft::CraftState>,
+    /// The window is open (`[0xbdcfb8]`), which a close alone zeroes (`0x4f5fe0`).
+    pub(crate) craft_open: bool,
     /// `DoCraft` spell ids; no count, as the 1.12 CraftFrame has no Create All.
     pub(crate) craft_dos: Vec<u32>,
     /// The 1-based selection, 0 for none, carried across a re-push by the recipe's spell id.
@@ -811,8 +834,6 @@ pub(crate) struct Model {
     /// The open group-loot rolls, and the `RollOnLoot` `(roll_id, roll_type)` votes.
     pub(crate) loot_rolls: loot_roll::LootRollsState,
     pub(crate) loot_roll_votes: Vec<(u32, u8)>,
-    /// Need or Greed on a bind-on-pickup roll: a `CONFIRM_LOOT_ROLL` popup ask, not a vote.
-    pub(crate) loot_roll_confirms: Vec<(u32, u8)>,
 
     /// The item-text reader: the pushed page, then the close and page-turn calls.
     pub(crate) item_text: Option<item_text::ItemTextState>,
@@ -821,6 +842,16 @@ pub(crate) struct Model {
     /// The open inbox and mail calls, rows 1-based: `mail_opens` are rows `GetInboxText` read.
     pub(crate) mail: Option<mail::MailState>,
     pub(crate) mail_check_inbox: bool,
+    /// `CheckInbox`'s throttle `[0xb6efc4]`, on the `GetTime` clock: the list query 60 s ago
+    /// plus its window, before which a check re-announces the held list instead.
+    pub(crate) mail_list_stamp: Option<f64>,
+    /// A mail request in flight (`[0xb6efc8]`), set by the list query and cleared by its answer
+    /// or a send's; `CheckInbox` does nothing while it is set.
+    pub(crate) mail_busy: bool,
+    /// A send awaits its result (`[0xb6efac]`): set with the send (`0x4aea76`), lifted only by
+    /// the send's result (`0x4ad159`) or the compose reset (`0x4ace02`); `SendMail` returns while
+    /// it is up (`0x4ae85e`).
+    pub(crate) mail_send_pending: bool,
     pub(crate) mail_opens: Vec<u32>,
     pub(crate) mail_take_items: Vec<u32>,
     pub(crate) mail_take_money: Vec<u32>,
@@ -856,7 +887,7 @@ pub(crate) struct Model {
     pub(crate) auction_bidder_query: Option<u32>,
     pub(crate) auction_bids: Vec<auction::AuctionBid>,
     pub(crate) auction_cancels: Vec<u32>,
-    pub(crate) auction_start: Option<auction::AuctionStartRequest>,
+    pub(crate) auction_starts: Vec<auction::AuctionStartRequest>,
     pub(crate) auction_sorts: Vec<(usize, String)>,
     pub(crate) auction_close: bool,
     /// The sell slot's item, resolved to its guid when `StartAuction` fires.
@@ -876,6 +907,10 @@ pub(crate) struct Model {
     /// Items dropped on our slots, `(1-based trade slot, bag, slot)`, and the slots clicks cleared.
     pub(crate) trade_set_items: Vec<(u32, i64, u32)>,
     pub(crate) trade_clear_items: Vec<u32>,
+    /// The item each of our trade slots holds, as the client's own table records it at the click
+    /// (`[0xb716d0]`, written by `0x4bfa70`): the item a later click puts back on the cursor, and
+    /// one the client keeps locked until the trade closes (`0x4bfcf0`).
+    pub(crate) trade_offered: [Option<cursor::CursorItem>; super::trade::TRADE_SLOTS],
 
     /// The open questgiver panel, its greeting-row selects and its button calls.
     pub(crate) quest: Option<quest::QuestState>,
@@ -916,8 +951,13 @@ pub(crate) struct Model {
     pub(crate) pet_spell_tooltip_asks: HashSet<u32>,
     /// The tooltips whose spell render missed its view, re-rendered when the app answers.
     pub(crate) spell_tooltip_waits: HashMap<FrameHandle, super::tooltip_spell::SpellWait>,
-    /// `CollapseQuestHeader`/`ExpandQuestHeader` as `(1-based entry, collapse)`, entry 0 for all.
-    pub(crate) quest_log_collapses: Vec<(u32, bool)>,
+    /// Every quest-log row as the app pushed it, each header followed by all its quests, which
+    /// [`quest_log::fold`] folds into the visible [`Self::quest_log`].
+    pub(crate) quest_log_rows: Vec<quest_log::QuestLogEntryView>,
+    /// The collapsed headers by title, the reference's fold mask `0xbb748c`.
+    pub(crate) quest_log_collapsed: HashSet<String>,
+    /// A selected quest a previous VM left, placed at the first push.
+    pub(crate) quest_log_selection_seed: Option<u32>,
     /// Watched quest ids in watch order, pruned when a quest leaves the log.
     pub(crate) quest_log_watched: Vec<u32>,
     /// The server's clock in Unix seconds, `None` before `SMSG_QUERY_TIME_RESPONSE`. A quest
@@ -1035,7 +1075,11 @@ pub(crate) struct Model {
     pub(crate) pending_events: Vec<(String, Vec<ScriptValue>)>,
     /// The events the running [`super::tick::verb`] segment has raised, fired in order once its
     /// model borrow drops; `None` outside a segment, where [`Model::raise`] queues instead.
-    pub(crate) verb_events: Option<Vec<(String, Vec<ScriptValue>)>>,
+    pub(crate) verb_events: Option<Vec<super::tick::Raised>>,
+    /// The guids of the items the client holds locked, the reference's `item+0x314` bit 0, set by
+    /// `LockItem` (`0x4953e0`) and cleared by `UnlockItem` (`0x495420`) and the unlock-all
+    /// (`0x495460`) ([`super::cursor::lock_item`]).
+    pub(crate) item_locks: std::collections::HashSet<u64>,
     /// The last cursor position in UI space (logical px, y-up), behind `GetCursorPosition()`.
     pub(crate) cursor_pos: (f32, f32),
 
@@ -1171,7 +1215,7 @@ impl Model {
             vm: super::glue::VmKind::InGame,
             addons: Vec::new(),
             addon_index: Vec::new(),
-            addon_info_hidden: None,
+            addon_reply: None,
             addon_enable: Default::default(),
             addon_enable_saved: Default::default(),
             addons_root: None,
@@ -1208,6 +1252,7 @@ impl Model {
             resolved: HashMap::new(),
             link_buttons: HashMap::new(),
             region_data: HashMap::new(),
+            texels: super::texel::Texels::default(),
             backdrops: HashMap::new(),
             simple_html: simplehtml::SimpleHtmlStates::new(),
             font_objects_by_lower: HashMap::new(),
@@ -1226,6 +1271,7 @@ impl Model {
             on_update_model_frames: Vec::new(),
             model_facts: HashMap::new(),
             model_facts_wanted: Vec::new(),
+            model_instances: 0,
             event_to_frames: HashMap::new(),
             frame_events: HashMap::new(),
             all_event_frames: Vec::new(),
@@ -1298,6 +1344,8 @@ impl Model {
             channel_commands: Vec::new(),
             guild_recruitment_mode: 1,
             guild_recruitment_cascade: false,
+            guild_recruitment_plan: Default::default(),
+            guild_recruitment_runs: Vec::new(),
             guild_recruitment_changed: false,
             emote_requests: Vec::new(),
             roll_requests: Vec::new(),
@@ -1394,6 +1442,7 @@ impl Model {
             pet_autocast_toggles: Vec::new(),
             pet_stop_attacks: 0,
             player_control: true,
+            control_bypass: HashSet::new(),
             pet_set_actions: Vec::new(),
             pet_abandons: 0,
             pet_dismisses: 0,
@@ -1402,8 +1451,7 @@ impl Model {
             container_cooldowns: HashMap::new(),
             has_key: false,
             cursor: None,
-            cursor_grid_shown: false,
-            pet_grid_shown: false,
+            cursor_grid: false,
             world_pick: cursor::WorldPick::default(),
             container_moves: Vec::new(),
             container_repairs: Vec::new(),
@@ -1416,6 +1464,7 @@ impl Model {
             ui_cursor: None,
             ui_cursor_dirty: false,
             container_autoequips: Vec::new(),
+            container_equip_asks: Vec::new(),
             bag_autostores: Vec::new(),
             drag_registered: HashMap::new(),
             drag: None,
@@ -1452,6 +1501,7 @@ impl Model {
             taxi_close: false,
             taxi_riding: false,
             trade_skill: None,
+            trade_skill_open: false,
             trade_skill_dos: Vec::new(),
             trade_skill_selection: 0,
             trade_skill_close: false,
@@ -1460,8 +1510,10 @@ impl Model {
             trade_skill_invslot_mask: u32::MAX,
             trade_skill_last_line: 0,
             trade_skill_selected_spell: 0,
-            trade_skill_touched: false,
+            trade_skill_repeat_spell: 0,
+            trade_skill_repeat_count: 0,
             craft: None,
+            craft_open: false,
             craft_dos: Vec::new(),
             craft_selection: 0,
             craft_close: false,
@@ -1474,12 +1526,14 @@ impl Model {
             loot_master_gives: Vec::new(),
             loot_rolls: loot_roll::LootRollsState::default(),
             loot_roll_votes: Vec::new(),
-            loot_roll_confirms: Vec::new(),
             item_text: None,
             item_text_close: false,
             item_text_page_turns: Vec::new(),
             mail: None,
             mail_check_inbox: false,
+            mail_list_stamp: None,
+            mail_busy: false,
+            mail_send_pending: false,
             mail_opens: Vec::new(),
             mail_take_items: Vec::new(),
             mail_take_money: Vec::new(),
@@ -1505,7 +1559,7 @@ impl Model {
             auction_bidder_query: None,
             auction_bids: Vec::new(),
             auction_cancels: Vec::new(),
-            auction_start: None,
+            auction_starts: Vec::new(),
             auction_sorts: Vec::new(),
             auction_close: false,
             auction_sell_item: None,
@@ -1519,6 +1573,7 @@ impl Model {
             trade_set_money: None,
             trade_set_items: Vec::new(),
             trade_clear_items: Vec::new(),
+            trade_offered: Default::default(),
             quest: None,
             quest_selects: Vec::new(),
             quest_actions: Vec::new(),
@@ -1541,7 +1596,9 @@ impl Model {
             pet_spell_tooltips: HashMap::new(),
             pet_spell_tooltip_asks: HashSet::new(),
             spell_tooltip_waits: HashMap::new(),
-            quest_log_collapses: Vec::new(),
+            quest_log_rows: Vec::new(),
+            quest_log_collapsed: HashSet::new(),
+            quest_log_selection_seed: None,
             quest_log_watched: Vec::new(),
             server_unix_time: None,
             worldmap: super::worldmap::WorldMapState::default(),
@@ -1550,6 +1607,7 @@ impl Model {
             worldstate: super::worldstate::WorldStateUiState::default(),
             pending_events: Vec::new(),
             verb_events: None,
+            item_locks: std::collections::HashSet::new(),
             cursor_pos: (0.0, 0.0),
             minimap_ping_request: None,
             minimap_ping: (0.0, 0.0),
@@ -2246,6 +2304,19 @@ impl Model {
         if let Some(&id) = self.frame_to_id.get(&h) {
             self.layout_unsettled.insert(id);
         }
+    }
+
+    /// Set region `rh`'s texture slot ([`super::texel::Texels::set`]), the one way it is written.
+    pub(crate) fn set_texel(&mut self, rh: RegionHandle, set: super::texel::TexSet) {
+        let Model {
+            region_data,
+            texels,
+            texture_probe,
+            ..
+        } = self;
+        let data = region_data.entry(rh).or_default();
+        let missing = |p: &str| texture_probe.as_ref().is_some_and(|probe| !probe(p));
+        texels.set(&mut data.tex, set, missing);
     }
 
     /// New art on region `rh` (`SetTexture` `0x770200`, the colour form `0x770360`): it marks
