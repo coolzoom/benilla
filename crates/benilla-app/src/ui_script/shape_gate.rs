@@ -188,6 +188,23 @@ fn every_query_binding_answers_the_reference_s_return_arity() {
             answered.push(args);
             measured = true;
             if !want.contains(&(got as usize)) {
+                // A deliberate Turtle extension answers an arity the vanilla table does not
+                // state. Both are pinned: the vanilla arity the table holds, and the extended one
+                // the runtime answers, so either moving fails here.
+                if let Some((_, vanilla, turtle, consumer)) =
+                    TURTLE_ARITY_EXTENSIONS.iter().find(|(n, ..)| n == name)
+                {
+                    assert_eq!(
+                        *vanilla, want[0],
+                        "{name}'s recorded vanilla arity is stale: the reference now says {}",
+                        want[0]
+                    );
+                    assert_eq!(
+                        *turtle, got as usize,
+                        "{name}'s Turtle extension changed: {consumer}"
+                    );
+                    continue;
+                }
                 if let Some((_, known, _)) = NOT_YET_ASSERTED.iter().find(|(n, ..)| n == name) {
                     assert!(
                         want.contains(known),
