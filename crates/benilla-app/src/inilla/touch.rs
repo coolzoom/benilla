@@ -44,6 +44,9 @@ pub(crate) struct TouchState {
     bare: TouchLayout,
     /// The engine has been told which commands are held (the registry's `Held` kinds).
     held_known: bool,
+    /// The FrameXML layer (`MobileInterface.xml`) owns touch this frame: set in [`process`] and
+    /// read by the HUD, whose system is already at Bevy's parameter ceiling.
+    pub(crate) layer_touch: bool,
 }
 
 /// Actions a HUD element or controller asked for that are not game bindings.
@@ -57,17 +60,35 @@ pub(crate) struct HudActions {
 }
 
 /// Is the touch HUD showing its elements this frame?
+///
+/// It stands down while `mobileInterface` is on: that interface is the *layer*
+/// (`MobileInterface.xml`), which draws the same stick, wheel and rings in FrameXML, so a
+/// third-party addon can see and restyle every piece of it — which this egui lane's own painter
+/// cannot offer. One of the two owns the screen, never both.
 pub(crate) fn hud_visible(
     state: &Inilla,
     client: &ClientState,
     overlay: &Overlay,
     pad_active: bool,
+    layer_touch: bool,
 ) -> bool {
     super::touch_device()
+        && !layer_touch
         && state.layout.enabled
         && *client == ClientState::InWorld
         && !overlay.blocks_game()
         && !(pad_active && state.settings.hide_touch_with_controller)
+}
+
+/// Is the FrameXML touch layer (`MobileInterface.xml`) the live one? Its CVar is the switch both
+/// it and [`hud_visible`] read, so the two never both draw a stick.
+///
+/// The layer's finger router is `crate::touch_mouse`, which is compiled for Android alone, so the
+/// CVar ships 1 on Android and 0 elsewhere: on iOS this HUD stays the live one rather than the
+/// layer drawing a stick nothing would drive. Whatever drives the layer on iOS — the router
+/// widened, or this engine feeding it — flips the default.
+pub(crate) fn layer_touch(cvars: &crate::cvars::Cvars) -> bool {
+    cvars.flag("mobileInterface").unwrap_or(false)
 }
 
 pub(crate) struct TouchPlugin;
@@ -117,6 +138,7 @@ struct Env<'w, 's> {
     client: Res<'w, State<ClientState>>,
     overlay: Res<'w, Overlay>,
     pad: Res<'w, super::pad::PadHud>,
+    cvars: Res<'w, crate::cvars::Cvars>,
 }
 
 /// Whether a jump now would cost the player something: seated (a jump stands them up, ending a
@@ -162,6 +184,7 @@ fn process(
         client,
         overlay,
         pad,
+        cvars,
     } = env;
     if !super::touch_device() {
         touches.clear();
@@ -175,7 +198,8 @@ fn process(
     let in_world = *client.get() == ClientState::InWorld;
     // The HUD yields to a controller in use, and comes back with the next touch.
     let pad_active = pad.active(now) && pad.last_active > state.last_touch;
-    let show = hud_visible(&inilla, client.get(), &overlay, pad_active);
+    state.layer_touch = layer_touch(&cvars);
+    let show = hud_visible(&inilla, client.get(), &overlay, pad_active, state.layer_touch);
     let blocked = overlay.blocks_game();
 
     // "Is a mouse-enabled FrameXML frame under this point?" — the input pass's own conversion

@@ -548,7 +548,10 @@ pub(crate) const REGISTERED: &[Registered] = &[
          such preset",
     ),
     // The touch interface (`MobileInterface.xml`, `touch_mouse`): a stick, an action wheel and
-    // portrait rings in place of the stock bars. On by default where the screen is a touch one.
+    // portrait rings in place of the stock bars. On by default on a touch screen, and the switch
+    // that picks it over iNilla's egui HUD (`inilla::touch`), which stands down while it is up:
+    // this one is the interface *layer*, so a third-party addon can see and restyle everything
+    // on it, which the egui lane's own painter cannot offer.
     ours(
         "mobileInterface",
         if cfg!(target_os = "android") { "1" } else { "0" },

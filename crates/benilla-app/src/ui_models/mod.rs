@@ -1801,6 +1801,9 @@ mod tests {
                 visibility_off: false,
             },
             bone_pivot: [0.0; 3],
+            synthetic: false,
+            flame: false,
+            spell: None,
         };
         let scene = TileScene::of_pane(&req, &[torch]);
         assert_eq!(scene.rig, scene_rig(&[torch]));
