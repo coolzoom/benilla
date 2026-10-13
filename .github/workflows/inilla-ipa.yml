@@ -77,7 +77,9 @@ jobs:
         run: ios/build-staticlib.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: inilla-ios-staticlib
+          # Per-variant: the dev and player jobs share a workflow run, and one artifact name
+          # would let a player packaging job download a dev staticlib.
+          name: inilla-ios-staticlib-${{ inputs.dev && 'dev' || 'player' }}
           path: |
             target/inilla-ios-out/libinilla_ios.a
             target/inilla-ios-out/lib/
@@ -98,7 +100,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: inilla-ios-staticlib
+          name: inilla-ios-staticlib-${{ inputs.dev && 'dev' || 'player' }}
           path: target/inilla-ios-out
       - name: Package iNilla.ipa
         env:

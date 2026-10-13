@@ -23,7 +23,14 @@ if [ "$(uname -s)" != "Darwin" ]; then
     source "$ROOT/ios/toolchain/linux-env.sh"
 fi
 
-rustup target add "$TARGET" >/dev/null 2>&1 || true
+# The target adds itself when missing; a failure here (no rustup, offline) otherwise surfaces
+# much later as a confusing "can't find crate for `std`".
+if ! rustup target list --installed 2>/dev/null | grep -qx "$TARGET"; then
+    rustup target add "$TARGET" || {
+        echo "inilla: rustup target add $TARGET failed — install rustup or check the network" >&2
+        exit 1
+    }
+fi
 
 feature_args=()
 if [ -n "$FEATURES" ]; then

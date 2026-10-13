@@ -12,7 +12,7 @@
 # libc headers that Zig distributes (APSL/BSD, from Apple's open-source Libc/xnu drops), plus two
 # small shims in `shims/` for <os/log.h>, which only the SDK carries.
 #
-# The final link (`ios/build-ipa.sh`) is the one step that runs on macOS: it needs the SDK's
+# The final link (`ios/package-ipa.sh`) is the one step that runs on macOS: it needs the SDK's
 # framework stubs, and that is a couple of minutes on a macOS runner instead of the full compile.
 
 _kd_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -51,7 +51,12 @@ EOF
 }
 
 if [ ! -f "$_kd_sysroot/usr/include/os/log.h" ]; then
-    _kd_make_sysroot || echo "inilla: sysroot setup FAILED" >&2
+    # A failed setup used to warn and carry on, leaving SDKROOT/CC pointed at a sysroot with
+    # nothing in it; every C file then failed far away from the cause.
+    _kd_make_sysroot || {
+        echo "inilla: sysroot setup FAILED at $_kd_sysroot — the iOS build cannot continue" >&2
+        return 1 2>/dev/null || exit 1
+    }
 fi
 
 _kd_clang="$(command -v clang-18 || command -v clang)"

@@ -251,14 +251,31 @@ so_path() {
 
 # ── package ─────────────────────────────────────────────────────────────────────────────────────
 
+# The one version pair both manifests carry. `versionCode` is frozen at 1 in a literal, and an
+# installer then reads every build as the same one; a commit count rises with every build and is
+# stable for a given tree. `ANDROID_VERSION_CODE` overrides it, as CI wants a run number.
+version_name() {
+    awk -F'"' '/^version *=/ {print $2; exit}' "$root/Cargo.toml"
+}
+
+version_code() {
+    if [ -n "${ANDROID_VERSION_CODE:-}" ]; then
+        echo "$ANDROID_VERSION_CODE"
+        return
+    fi
+    local n
+    n="$(git -C "$root" rev-list --count HEAD 2>/dev/null || echo 1)"
+    echo "${n:-1}"
+}
+
 write_manifest() {
     local version
-    version="$(awk -F'"' '/^version *=/ {print $2; exit}' "$root/Cargo.toml")"
+    version="$(version_name)"
     cat >"$1" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="$PKG"
-    android:versionCode="1"
+    android:versionCode="$(version_code)"
     android:versionName="$version">
     <uses-sdk android:minSdkVersion="$API" android:targetSdkVersion="$SDK_PLATFORM" />
     <uses-feature android:name="android.hardware.vulkan.level" android:version="1" android:required="true" />
@@ -348,14 +365,14 @@ data_mpqs() {
 
 write_xapk_manifest() {
     local f="$1" data="$2" version size name first=1
-    version="$(awk -F'"' '/^version *=/ {print $2; exit}' "$root/Cargo.toml")"
+    version="$(version_name)"
     size="$(du -sk "$out/benilla.apk" | cut -f1)"
     {
         echo '{'
         echo '  "xapk_version": 2,'
         echo "  \"package_name\": \"$PKG\","
         echo '  "name": "benilla",'
-        echo '  "version_code": "1",'
+        echo "  \"version_code\": \"$(version_code)\","
         echo "  \"version_name\": \"$version\","
         echo "  \"min_sdk_version\": \"$API\","
         echo "  \"target_sdk_version\": \"$SDK_PLATFORM\","
