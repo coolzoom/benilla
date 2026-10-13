@@ -8,16 +8,26 @@
 //! only read it answer here, and `SelectCharacter` fires `UPDATE_SELECTED_CHARACTER` as it returns,
 //! as `0x472740` does. Indices are 1-based in Lua and 0-based inside, the boundary at `0x473470`.
 //!
-//! The 3-D side of the reference (`0x472950`'s model build into the scene, the attachment detaches
-//! `0x4722c0`/`0x4722e0`, the camera reset `0x76cec0`) is the host's scene drive and lives outside
-//! this module; what a build leaves behind for Lua to see is kept here: the facing reset and the
-//! build counter that gates `SetCharacterSelectFacing`.
+//! `DeleteCharacter` and `RenameCharacter` check here and call the glue manager in place with what
+//! the reference sends (`0x46b2e0`, `0x46b340`), whose screen states are the host's; `EnterWorld`
+//! calls it with the selected record (`0x46b500`); the rename reply's applier
+//! (`0x4725f0`) changes the record here once the host has moved the character's files.
+//!
+//! The 3-D side of the reference (`0x472950`'s model build into the scene) is the host's scene
+//! drive; what it reads is kept here: the shown `ModelFFX` pane's scene ([`GlueScenePane`]), the
+//! character standing on the scene's attachment 0 ([`super::UiScript::glue_standing_guid`]), and
+//! the facing. What a build leaves behind for Lua to see is kept here too: the facing reset and
+//! the build counter that gates `SetCharacterSelectFacing`.
 
 use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::{flag, number_arg, string_arg};
-use super::glue_core::{leading_int, queue, GlueRequest};
-use super::{Model, ScriptValue};
+use super::glue_core::{call, glue_status_key, leading_int, GlueCall};
+use super::{check_char_name, Model, ScriptValue, CHAR_NAME_SUCCESS};
+
+/// The record flag a server sets on a character it wants renamed (`[rec+0xfc]` bit `0x4000`,
+/// tested at `0x4735ab`, cleared at `0x472722`).
+const FLAG_RENAME: u32 = 0x4000;
 
 /// One character of the roster as `GetCharacterInfo` (`0x4732a0`) reads the record. The host
 /// resolves the DBC-backed strings; an absent row is the empty string where the reference pushes
@@ -70,6 +80,30 @@ impl Default for GlueSelectCells {
     }
 }
 
+/// The scene a shown `ModelFFX` pane draws, as the host's scene drive reads it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GlueScenePane {
+    /// The pane, whose `OnShow` (`0x46fa60`) resets the glue glow when it appears.
+    pub handle: crate::widget::FrameHandle,
+    /// The pane's rect as fractions of the screen, `[left, right, top, bottom]` from the top-left:
+    /// the scene's viewport (`0x76d5d7`), whose `w/h` is the projection's aspect. `None` until the
+    /// layout has placed it.
+    pub rect: Option<[f32; 4]>,
+    /// The instance the pane's last `SetModel` made ([`crate::widget::ModelState::instance`]).
+    pub instance: u64,
+    /// The file the pane's last `SetModel` gave it: the XML `file`, `Model:SetModel`, or
+    /// `SetCharSelectBackground`'s (`0x472128`, the pane's own `SetModel`).
+    pub path: String,
+    /// The fog the scene draws with ([`crate::widget::ModelState::scene_fog`]).
+    pub fog: Option<crate::widget::ModelFog>,
+    /// The pane is the select screen's model frame (`[0xb42174]`), whose scene the selected
+    /// character stands in.
+    pub select: bool,
+    /// The pane is the create screen's customize frame (`[0xb420f0]`), whose scene the preview
+    /// character stands in.
+    pub create: bool,
+}
+
 /// A record of the array: the character and whether `+0x110`, the built composite, is set.
 #[derive(Clone, Debug)]
 struct Record {
@@ -84,14 +118,12 @@ pub(crate) struct GlueRoster {
     cells: GlueSelectCells,
     /// `[0xb42174]`: the name of the model frame `SetCharSelectModelFrame` found.
     model_frame: Option<String>,
-    /// The file `SetCharSelectBackground` last gave the model frame (`0x472110`).
-    background: Option<String>,
 }
 
 /// `rad = deg · 0.017453292` (`0x7ffaac`, a float).
-const DEG_TO_RAD: f32 = f32::from_bits(0x3c8e_fa35);
+pub(super) const DEG_TO_RAD: f32 = f32::from_bits(0x3c8e_fa35);
 /// `deg = rad · 57.29578` (`0x803a78`, a float).
-const RAD_TO_DEG: f32 = f32::from_bits(0x4265_2ee1);
+pub(super) const RAD_TO_DEG: f32 = f32::from_bits(0x4265_2ee1);
 
 impl GlueRoster {
     /// `0x473700` on every record and the count to 0 (`0x4723ff`, `0x4725af`).
@@ -145,10 +177,56 @@ impl super::UiScript {
         self.model_mut().glue.roster.cells = cells;
     }
 
-    /// The model frame's background file, as `SetCharSelectBackground` last recorded it: what the
-    /// scene drive loads into the select scene.
+    /// The file `SetCharSelectBackground` gave the model frame, while its scene still holds it: a
+    /// later `SetModel` on the frame replaces the scene and its fill callback with it.
     pub fn glue_select_background(&self) -> Option<String> {
-        self.model_ref().glue.roster.background.clone()
+        let model = self.model_ref();
+        let h = model_frame_handle(&model)?;
+        match &model.arena.frame(h)?.kind_state {
+            crate::widget::KindState::Model(m) if m.select_fill => m.path.clone(),
+            _ => None,
+        }
+    }
+
+    /// The character standing on the select scene's attachment 0: the selected record once
+    /// `0x472950` has built its composite (`+0x110`) and attached it (`0x473039`). The list ask
+    /// (`0x4723d0`) and the teardown (`0x472580`) free the records and then detach
+    /// (`0x4722c0`/`0x4722e0` at `0x472409` and `0x4725b9`); the load (`0x4724d0`) frees them at
+    /// `0x4724ee` and detaches later in the same call, through the select's build
+    /// (`0x472740` → `0x472a44`) or, for an empty roster, at `0x472533`. World entry's free
+    /// (`0x472090`) detaches nothing, and the glue screens go with it.
+    pub fn glue_standing_guid(&self) -> Option<u64> {
+        let model = self.model_ref();
+        let roster = &model.glue.roster;
+        usize::try_from(roster.cells.selected)
+            .ok()
+            .and_then(|i| roster.records.get(i))
+            .filter(|r| r.built)
+            .map(|r| r.character.guid)
+    }
+
+    /// The scene of the shown `ModelFFX` pane, the topmost by (strata, level) if more than one is
+    /// shown; `None` with none shown, or one holding no file.
+    pub fn glue_scene(&self) -> Option<GlueScenePane> {
+        let model = self.model_ref();
+        model
+            .arena
+            .model_kinds()
+            .iter()
+            .filter(|&&h| model.arena.frame(h).is_some_and(|f| f.effective_visible))
+            .filter_map(|&h| {
+                let f = model.arena.frame(h)?;
+                Some(((f.strata, f.level), scene_pane(&model, h)?))
+            })
+            .max_by_key(|(order, _)| *order)
+            .map(|(_, pane)| pane)
+    }
+
+    /// The scene of the `ModelFFX` pane `h`, shown or hidden: a hidden pane keeps its model and
+    /// scene, and only its clock stops (its `OnUpdate`, `0x76d7f0`, runs from the visible-frame
+    /// pump `0x765650`). `None` for a frame that is no `ModelFFX` or holds no file.
+    pub fn glue_pane(&self, h: crate::widget::FrameHandle) -> Option<GlueScenePane> {
+        scene_pane(&self.model_ref(), h)
     }
 
     /// The selected character's guid, none off the roster.
@@ -159,6 +237,41 @@ impl super::UiScript {
             .ok()
             .and_then(|i| roster.records.get(i))
             .map(|r| r.character.guid)
+    }
+
+    /// The name of the record with `guid`, none off the roster: the rename reply's applier
+    /// (`0x4725f0`) finds the record by guid (`0x472613`-`0x472620`).
+    pub fn glue_character_name(&self, guid: u64) -> Option<String> {
+        self.model_ref()
+            .glue
+            .roster
+            .records
+            .iter()
+            .find(|r| r.character.guid == guid)
+            .map(|r| r.character.name.clone())
+    }
+
+    /// The rename reply's applier (`0x4725f0`) past the file moves, which are the host's: the
+    /// AddOn state carried from the old name to the new (`0x4726ff`, `0x472706`), the new name
+    /// copied into the record (`0x472718`), the rename flag cleared (`0x472722`) and
+    /// `CHARACTER_LIST_UPDATE` fired (`0x472732`). No record with `guid` is no change at all.
+    pub fn apply_glue_rename(&mut self, guid: u64, name: &str) {
+        {
+            let mut model = self.model_mut();
+            let glue = &mut model.glue;
+            let Some(record) = glue
+                .roster
+                .records
+                .iter_mut()
+                .find(|r| r.character.guid == guid)
+            else {
+                return;
+            };
+            glue.addons.rename(&record.character.name, name);
+            record.character.name = name.to_string();
+            record.character.flags &= !FLAG_RENAME;
+        }
+        self.fire_event("CHARACTER_LIST_UPDATE", Vec::new());
     }
 
     /// The roster's guids in order.
@@ -172,14 +285,9 @@ impl super::UiScript {
             .collect()
     }
 
-    /// The roster teardown (`0x472580`): the records freed, the count 0, the selection reset
-    /// through `0x472740(-1)`, which clamps to 0 and fires `UPDATE_SELECTED_CHARACTER` with 1 on
-    /// the empty roster whatever it held, then `CHARACTER_LIST_UPDATE`. The reset of the model
-    /// frame's camera (`0x76cec0`) is the scene drive's.
+    /// The roster teardown ([`teardown_roster`]).
     pub fn teardown_glue_roster(&mut self) {
-        self.model_mut().glue.roster.clear();
-        self.select_glue_character(-1);
-        self.fire_event("CHARACTER_LIST_UPDATE", Vec::new());
+        teardown_roster(&self.lua);
     }
 
     /// The roster load (`0x4724d0`), run when the character list reply completes: the old records
@@ -195,6 +303,12 @@ impl super::UiScript {
         let count = roster.len();
         {
             let mut model = self.model_mut();
+            // `0x51f0b0(NULL)` drops every AddOn node, then the appender loads one per record
+            // (`0x4724d0` through `0x5aabe0` and `0x472300`), the file named by the realm the
+            // session dialled (`0x5ab7d0`).
+            let names: Vec<String> = roster.iter().map(|c| c.name.clone()).collect();
+            let realm = super::glue_realm::realm_name(&model);
+            model.glue.addons.load(&realm, &names);
             model.glue.roster.records = roster
                 .into_iter()
                 .map(|character| Record {
@@ -224,6 +338,74 @@ impl super::UiScript {
             vec![ScriptValue::Number(f64::from(arg))],
         );
     }
+}
+
+/// The roster teardown (`0x472580`): the records freed, the count 0, the selection reset through
+/// `0x472740(-1)`, which clamps to 0 and fires `UPDATE_SELECTED_CHARACTER` with 1 on the empty
+/// roster whatever it held, the model frame's `SetCamera(0)` (`0x4725d7` → `0x76cec0`), then
+/// `CHARACTER_LIST_UPDATE`.
+pub(super) fn teardown_roster(lua: &Lua) {
+    let selected = {
+        let mut m = model(lua);
+        m.glue.roster.clear();
+        m.glue.roster.select(-1)
+    };
+    super::tick::fire_event_into(
+        lua,
+        "UPDATE_SELECTED_CHARACTER",
+        vec![ScriptValue::Number(f64::from(selected))],
+    );
+    {
+        let mut m = model(lua);
+        if let Some(h) = model_frame_handle(&m) {
+            m.set_pane_camera(h, 0);
+        }
+    }
+    super::tick::fire_event_into(lua, "CHARACTER_LIST_UPDATE", Vec::new());
+}
+
+/// The scene a `ModelFFX` pane `h` holds, visible or not ([`UiScript::glue_scene`]).
+fn scene_pane(model: &Model, h: crate::widget::FrameHandle) -> Option<GlueScenePane> {
+    let f = model.arena.frame(h)?;
+    let crate::widget::KindState::Model(m) = &f.kind_state else {
+        return None;
+    };
+    if !m.ffx {
+        return None;
+    }
+    let (sw, sh) = (model.screen.width(), model.screen.height());
+    Some(GlueScenePane {
+        handle: h,
+        rect: model
+            .resolved
+            .get(&h)
+            .filter(|_| sw > 0.0 && sh > 0.0)
+            .map(|r| {
+                [
+                    r.left / sw,
+                    r.right / sw,
+                    1.0 - r.top / sh,
+                    1.0 - r.bottom / sh,
+                ]
+            }),
+        instance: m.instance,
+        path: m.path.clone()?,
+        fog: m.scene_fog(),
+        select: model_frame_handle(model) == Some(h),
+        create: super::glue_create::create_frame_handle(model) == Some(h),
+    })
+}
+
+/// `[0xb42174]`'s frame, while the name `SetCharSelectModelFrame` took still names a model pane.
+fn model_frame_handle(model: &Model) -> Option<crate::widget::FrameHandle> {
+    let h = model
+        .arena
+        .lookup(model.glue.roster.model_frame.as_deref()?)?;
+    matches!(
+        model.arena.frame(h).map(|f| &f.kind_state),
+        Some(crate::widget::KindState::Model(_))
+    )
+    .then_some(h)
 }
 
 fn model(lua: &Lua) -> mlua::AppDataRefMut<'_, Model> {
@@ -262,10 +444,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // `0x473230`: the file (`0x6f3510`, else `0x83874c`) into `0x472110`, which needs the frame
-    // set and a non-empty name and hands it to the frame's SetModel (vtable `+0x94`).
-    //
-    // Only the path is recorded: the scene drive loads it into the select scene, and the frame's
-    // own model state, which benilla's widget renders nowhere on the glue, stays as it was.
+    // set and a non-empty name, hands it to the frame's own `SetModel` (vtable `+0x94`,
+    // `0x472128`), and on the new scene puts the select screen's fill callback `0x472150` where
+    // `SetModel` put the fog one (`0x472144`): the select scene never fogs once a background is set.
     g.set(
         "SetCharSelectBackground",
         lua.create_function(|lua, args: MultiValue| {
@@ -275,21 +456,27 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 "Usage: SetCharSelectBackground(\"filename\")",
             )?;
             let mut m = model(lua);
-            if m.glue.roster.model_frame.is_some() && !file.is_empty() {
-                m.glue.roster.background = Some(file);
+            let Some(h) = model_frame_handle(&m).filter(|_| !file.is_empty()) else {
+                return Ok(());
+            };
+            m.set_pane_model(h, file);
+            if let Some(crate::widget::KindState::Model(pane)) =
+                m.arena.frame_mut(h).map(|f| &mut f.kind_state)
+            {
+                pane.select_fill = true;
             }
             Ok(())
         })?,
     )?;
 
     // `0x473270` → `0x4723d0`: every record freed and the count 0 (`0x4723ff`) in the call, so a
-    // `GetNumCharacters` straight after reads 0; then `0x46b880`, the host's: state 3, the
-    // dialog and the list request.
+    // `GetNumCharacters` straight after reads 0; then `0x46b880`, the manager's, in the call:
+    // state 3 and the dialog, the list request its frame's to send.
     g.set(
         "GetCharacterListUpdate",
         lua.create_function(|lua, _: MultiValue| {
             model(lua).glue.roster.clear();
-            queue(lua, GlueRequest::GetCharacterList);
+            call(lua, GlueCall::GetCharacterList);
             Ok(())
         })?,
     )?;
@@ -359,6 +546,120 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 vec![ScriptValue::Number(f64::from(selected))],
             );
             Ok(())
+        })?,
+    )?;
+
+    // `0x4734c0`: one number or `Usage: DeleteCharacter(index)` (`0x8387b8`); an index in
+    // `[1, count]` hands its record's guid to `0x46b2e0`, which with a nonzero guid is the
+    // manager's, in the call (state 6, the dialog and the `CMSG_CHAR_DELETE`). No values on any
+    // path (`0x47351b`).
+    g.set(
+        "DeleteCharacter",
+        lua.create_function(|lua, args: MultiValue| {
+            let index =
+                number_arg(lua, arg(&args, 0), "Usage: DeleteCharacter(index)")?.wrapping_sub(1);
+            let guid = {
+                let m = model(lua);
+                usize::try_from(index)
+                    .ok()
+                    .and_then(|i| m.glue.roster.records.get(i))
+                    .map(|r| r.character.guid)
+            };
+            if let Some(guid) = guid.filter(|&g| g != 0) {
+                call(lua, GlueCall::DeleteCharacter(guid));
+            }
+            Ok(MultiValue::new())
+        })?,
+    )?;
+
+    // `0x473520`: one number or `Usage: RenameCharacter(index, name)` (`0x8387f0`). No values
+    // when the name is not a string or number (`0x6f3510`) or is empty as a C string
+    // (`0x6f3690`), the index is off the roster, or the record is not flagged for a rename
+    // (`0x4735ab`). A name equal to the old one, ASCII case folded (`0x4735bd`, `0x64a4c0`), fires
+    // `FORCE_RENAME_CHARACTER` with `CHAR_CREATE_NAME_IN_USE` (`0x4735d2`) and returns none.
+    // Otherwise `0x46b340` decides one value: 1, or nil when the name check (`0x5abd50`) fails,
+    // which fires `FORCE_RENAME_CHARACTER` with the check's key (`0x46b388`); a passing name is
+    // the manager's, in the call (state 7, the dialog and the `CMSG_CHAR_RENAME`), before the 1.
+    g.set(
+        "RenameCharacter",
+        lua.create_function(|lua, args: MultiValue| {
+            let index = number_arg(lua, arg(&args, 0), "Usage: RenameCharacter(index, name)")?
+                .wrapping_sub(1);
+            let name = match arg(&args, 1) {
+                v @ (Value::String(_) | Value::Integer(_) | Value::Number(_)) => lua
+                    .coerce_string(v)?
+                    .map(|s| s.to_string_lossy())
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            // A C string ends at its NUL.
+            let name = name.split('\0').next().unwrap_or_default().to_string();
+            if name.is_empty() {
+                return Ok(MultiValue::new());
+            }
+            let (guid, old, lists) = {
+                let m = model(lua);
+                let Some(record) = usize::try_from(index)
+                    .ok()
+                    .and_then(|i| m.glue.roster.records.get(i))
+                    .filter(|r| r.character.flags & FLAG_RENAME != 0)
+                else {
+                    return Ok(MultiValue::new());
+                };
+                (
+                    record.character.guid,
+                    record.character.name.clone(),
+                    m.glue.name_lists(),
+                )
+            };
+            let force_rename = |key: &str| {
+                super::tick::fire_event_into(
+                    lua,
+                    "FORCE_RENAME_CHARACTER",
+                    vec![ScriptValue::Str(key.to_string())],
+                );
+            };
+            if name.eq_ignore_ascii_case(&old) {
+                force_rename("CHAR_CREATE_NAME_IN_USE");
+                return Ok(MultiValue::new());
+            }
+            // `0x46b340`: a zero guid sends nothing and answers 1 (`0x46b355`).
+            if guid != 0 {
+                let status = check_char_name(Some(&name), &*lists);
+                if status != CHAR_NAME_SUCCESS {
+                    force_rename(glue_status_key(i32::from(status)));
+                    return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                }
+                call(lua, GlueCall::RenameCharacter { guid, name });
+            }
+            Ok(MultiValue::from_vec(vec![Value::Number(1.0)]))
+        })?,
+    )?;
+
+    // `0x46d3c0`, a glue core binding (table `0x8373b8`) that reads this roster: `CGlueMgr::
+    // EnterWorld` (`0x46b500`), then no values (`0x46d3c5 xor eax,eax`), arguments ignored. The
+    // selection cell indexes the record (`0x46b513`-`0x46b533`); off the roster the call returns
+    // having done nothing (`0x46b53e`). The record goes to the manager, whose guards come next,
+    // in the call.
+    g.set(
+        "EnterWorld",
+        lua.create_function(|lua, _: MultiValue| {
+            let entry = {
+                let m = model(lua);
+                let roster = &m.glue.roster;
+                usize::try_from(roster.cells.selected)
+                    .ok()
+                    .and_then(|i| roster.records.get(i))
+                    .map(|r| GlueCall::EnterWorld {
+                        index: roster.cells.selected,
+                        guid: r.character.guid,
+                        flags: r.character.flags,
+                    })
+            };
+            if let Some(entry) = entry {
+                call(lua, entry);
+            }
+            Ok(MultiValue::new())
         })?,
     )?;
 
@@ -668,9 +969,18 @@ mod tests {
         s.run("SetCharSelectModelFrame('Scene') SetCharSelectBackground('a.mdx')")
             .unwrap();
         assert_eq!(s.glue_select_background().as_deref(), Some("a.mdx"));
+        // It is the frame's own `SetModel` (`0x472128`).
+        assert_eq!(
+            s.eval::<String>("return Scene:GetModel()").unwrap(),
+            "a.mdx"
+        );
         // An empty name is ignored (`0x472123`).
         s.run("SetCharSelectBackground('')").unwrap();
         assert_eq!(s.glue_select_background().as_deref(), Some("a.mdx"));
+        // The frame's own `SetModel` replaces the scene, and the select fill with it.
+        s.run("Scene:SetModel('b.mdx')").unwrap();
+        assert_eq!(s.glue_select_background(), None);
+        s.run("SetCharSelectBackground('a.mdx')").unwrap();
         for (call, usage) in [
             (
                 "SetCharSelectModelFrame()",
@@ -687,17 +997,141 @@ mod tests {
         s.run("UpdateSelectionCustomizationScene()").unwrap();
     }
 
+    /// The scene's fog follows its fill callback: `SetModel` installs the fog one (`0x76cd96`), so
+    /// the select screen's OnLoad scene fogs with the fog its fields hold; `SetCharSelectBackground`
+    /// installs `0x472150` over it (`0x472144`), and the fog fields written after it change nothing;
+    /// the next `SetModel` brings the fog back.
+    #[test]
+    fn the_select_scene_fogs_until_a_background_is_set() {
+        let s = UiScript::new_glue().unwrap();
+        s.run(
+            "local f = CreateFrame('ModelFFX', 'Scene') \
+             f:SetModel('UI_Orc.mdx') f:SetFogColor(0.5, 0.5, 0.5) f:SetFogNear(0) \
+             f:SetFogFar(270) SetCharSelectModelFrame('Scene')",
+        )
+        .unwrap();
+        let pane = s.glue_scene().expect("the shown ModelFFX");
+        assert_eq!(pane.path, "UI_Orc.mdx");
+        assert!(pane.select);
+        let fog = pane.fog.expect("the OnLoad scene fogs");
+        assert_eq!((fog.near, fog.far), (0.0, 270.0));
+        assert_eq!(fog.rgb().map(|c| (c * 255.0).round()), [128.0; 3]);
+
+        s.run(
+            "SetCharSelectBackground('UI_Human.mdx') \
+             Scene:SetFogColor(0.8, 0.65, 0.73) Scene:SetFogFar(222)",
+        )
+        .unwrap();
+        let pane = s.glue_scene().unwrap();
+        assert_eq!((pane.path.as_str(), pane.fog), ("UI_Human.mdx", None));
+        // Every call makes a new instance, the same file included (`0x76ccf5`-`0x76cd0d`).
+        let first = pane.instance;
+        s.run("SetCharSelectBackground('UI_Human.mdx')").unwrap();
+        assert!(s.glue_scene().unwrap().instance > first);
+
+        s.run("Scene:SetModel('UI_Dwarf.mdx')").unwrap();
+        let pane = s.glue_scene().unwrap();
+        assert_eq!(pane.path, "UI_Dwarf.mdx");
+        assert_eq!(pane.fog.map(|f| f.far), Some(222.0));
+    }
+
+    /// The scene is the shown `ModelFFX`'s, the topmost when two are shown; a hidden one, a plain
+    /// `Model` and a pane with no file are none.
+    #[test]
+    fn the_scene_is_the_topmost_shown_model_ffx() {
+        let mut s = UiScript::new_glue().unwrap();
+        s.set_screen_size(1024.0, 768.0);
+        assert_eq!(s.glue_scene(), None);
+        s.run(
+            "local low = CreateFrame('ModelFFX', 'Low') low:SetModel('low.mdx') \
+             low:SetFrameLevel(2) \
+             local high = CreateFrame('ModelFFX', 'High') high:SetModel('high.mdx') \
+             high:SetFrameLevel(5) \
+             local plain = CreateFrame('Model', 'Plain') plain:SetModel('plain.mdx') \
+             plain:SetFrameLevel(9) \
+             CreateFrame('ModelFFX', 'Empty'):SetFrameLevel(9)",
+        )
+        .unwrap();
+        let pane = s.glue_scene().unwrap();
+        assert_eq!(pane.path, "high.mdx");
+        assert!(!pane.select && pane.fog.is_none());
+        assert_eq!(pane.rect, None, "not laid out yet");
+        s.run("High:SetPoint('TOPLEFT', 256, -192) High:SetWidth(512) High:SetHeight(384)")
+            .unwrap();
+        s.resolve();
+        assert_eq!(
+            s.glue_scene().unwrap().rect,
+            Some([0.25, 0.75, 0.25, 0.75]),
+            "the rect as screen fractions from the top-left"
+        );
+        s.run("High:Hide()").unwrap();
+        assert_eq!(s.glue_scene().unwrap().path, "low.mdx");
+        s.run("Low:Hide()").unwrap();
+        assert_eq!(s.glue_scene(), None);
+    }
+
+    /// The character on the scene's attachment 0 is the selected record once its composite is
+    /// built: none for a record with no model, none once the records are freed.
+    #[test]
+    fn the_standing_character_is_the_built_selection() {
+        let mut roster = three();
+        roster[1].model = false;
+        let mut s = vm(roster);
+        assert_eq!(s.glue_standing_guid(), Some(1));
+        s.run("SelectCharacter(2)").unwrap();
+        assert_eq!(s.glue_selected_guid(), Some(2));
+        assert_eq!(s.glue_standing_guid(), None, "no model, nothing built");
+        s.run("SelectCharacter(3)").unwrap();
+        assert_eq!(s.glue_standing_guid(), Some(3));
+        s.run("GetCharacterListUpdate()").unwrap();
+        assert_eq!(s.glue_standing_guid(), None);
+        let _ = s.load_glue_roster(three());
+        assert_eq!(s.glue_standing_guid(), Some(1));
+        s.teardown_glue_roster();
+        assert_eq!(s.glue_standing_guid(), None);
+    }
+
+    /// `0x472580` ends with the model frame's `SetCamera(0)` (`0x4725d7`).
+    #[test]
+    fn the_teardown_puts_the_model_frame_back_on_camera_zero() {
+        let mut s = vm(three());
+        s.set_model_facts(
+            "a.mdx",
+            crate::widget::ModelFileFacts {
+                sequences: Vec::new(),
+                bbox: ([0.0; 3], [1.0; 3]),
+                cameras: 2,
+            },
+        );
+        s.run(
+            "CreateFrame('ModelFFX', 'Scene'):SetModel('a.mdx') Scene:SetCamera(1) \
+             SetCharSelectModelFrame('Scene')",
+        )
+        .unwrap();
+        let camera = |s: &UiScript| {
+            let model = s.model_ref();
+            let h = model.arena.lookup("Scene").unwrap();
+            match &model.arena.frame(h).unwrap().kind_state {
+                crate::widget::KindState::Model(m) => m.camera,
+                _ => unreachable!(),
+            }
+        };
+        assert_eq!(camera(&s), Some(1));
+        s.teardown_glue_roster();
+        assert_eq!(camera(&s), Some(0));
+    }
+
     /// `0x4723d0` clears at the call: the count reads 0 straight after, and the host is asked for
     /// the list.
     #[test]
     fn get_character_list_update_clears_and_asks_the_host() {
         let mut s = vm(three());
-        s.take_glue_requests();
+        s.take_glue_calls();
         s.run("GetCharacterListUpdate()").unwrap();
         assert_eq!(s.eval::<f64>("return GetNumCharacters()").unwrap(), 0.0);
         assert!(matches!(
-            s.take_glue_requests().as_slice(),
-            [GlueRequest::GetCharacterList]
+            s.take_glue_calls().as_slice(),
+            [GlueCall::GetCharacterList]
         ));
         assert!(fired(&s).is_empty(), "the clear fires nothing");
     }
@@ -747,6 +1181,222 @@ mod tests {
         s.set_cvar_engine("lastCharacterIndex", "-3");
         assert!(!s.load_glue_roster(three()));
         assert_eq!(fired(&s)[0], "UPDATE_SELECTED_CHARACTER 1");
+    }
+
+    /// A VM over `three()` with Bravo flagged for a rename, `FIRED` also logging
+    /// `FORCE_RENAME_CHARACTER`.
+    fn rename_vm() -> UiScript {
+        let mut roster = three();
+        roster[1].flags = FLAG_RENAME | 0x2000;
+        let mut s = vm(roster);
+        s.run("Listener:RegisterEvent('FORCE_RENAME_CHARACTER')")
+            .unwrap();
+        s.take_glue_calls();
+        s
+    }
+
+    /// `0x4734c0`: an index on the roster hands its guid to the host, every path returns nothing,
+    /// and only a non-number raises.
+    #[test]
+    fn delete_character_hands_the_records_guid_to_the_host() {
+        let mut roster = three();
+        roster[2].guid = 0;
+        let mut s = vm(roster);
+        s.take_glue_calls();
+        for call in [
+            "DeleteCharacter(2)",
+            "DeleteCharacter('2')",
+            "DeleteCharacter(0)",
+            "DeleteCharacter(4)",
+            "DeleteCharacter(-1)",
+            "DeleteCharacter(3)",
+        ] {
+            assert_eq!(s.eval::<f64>(&count(call)).unwrap(), 0.0, "{call}");
+        }
+        let queued = s.take_glue_calls();
+        assert!(
+            matches!(
+                queued.as_slice(),
+                [GlueCall::DeleteCharacter(2), GlueCall::DeleteCharacter(2)]
+            ),
+            "off the roster, or a zero guid (`0x46b2ed`), sends nothing: {queued:?}"
+        );
+        for call in ["DeleteCharacter()", "DeleteCharacter('x')"] {
+            let err = s.run(call).unwrap_err().to_string();
+            assert!(err.contains("Usage: DeleteCharacter(index)"), "{err}");
+        }
+        assert!(fired(&s).is_empty(), "the verb fires nothing itself");
+    }
+
+    /// `0x473520`'s silent arms: no values, nothing fired, nothing sent.
+    #[test]
+    fn rename_character_returns_nothing_off_its_checks() {
+        let mut s = rename_vm();
+        for call in [
+            "RenameCharacter(2)",
+            "RenameCharacter(2, nil)",
+            "RenameCharacter(2, {})",
+            "RenameCharacter(2, '')",
+            "RenameCharacter(2, '\\0Newname')",
+            "RenameCharacter(0, 'Newname')",
+            "RenameCharacter(4, 'Newname')",
+            // Alpha is not flagged (`0x4735ab`).
+            "RenameCharacter(1, 'Newname')",
+        ] {
+            assert_eq!(s.eval::<f64>(&count(call)).unwrap(), 0.0, "{call}");
+        }
+        assert!(fired(&s).is_empty());
+        assert!(s.take_glue_calls().is_empty());
+        for call in ["RenameCharacter()", "RenameCharacter('x', 'Newname')"] {
+            let err = s.run(call).unwrap_err().to_string();
+            assert!(err.contains("Usage: RenameCharacter(index, name)"), "{err}");
+        }
+    }
+
+    /// The old name again, case folded, is `CHAR_CREATE_NAME_IN_USE` and no values (`0x4735bd`).
+    #[test]
+    fn rename_character_to_the_same_name_is_name_in_use() {
+        let mut s = rename_vm();
+        assert_eq!(
+            s.eval::<f64>(&count("RenameCharacter(2, 'bRAVO')"))
+                .unwrap(),
+            0.0
+        );
+        assert_eq!(
+            fired(&s),
+            ["FORCE_RENAME_CHARACTER CHAR_CREATE_NAME_IN_USE"]
+        );
+        assert!(s.take_glue_calls().is_empty());
+    }
+
+    /// A name the check fails is `FORCE_RENAME_CHARACTER` with the check's key, one nil and
+    /// nothing sent (`0x46b379`-`0x46b392`); a number is a name too, as its string.
+    #[test]
+    fn rename_character_with_a_failing_name_fires_the_checks_key() {
+        struct Reserved;
+        impl super::super::NameLists for Reserved {
+            fn matches(&self, name: &str) -> bool {
+                name.eq_ignore_ascii_case("thrall")
+            }
+        }
+        let mut s = rename_vm();
+        s.set_glue_name_lists(std::rc::Rc::new(Reserved));
+        for (call, key) in [
+            ("RenameCharacter(2, 'X')", "CHAR_NAME_TOO_SHORT"),
+            ("RenameCharacter(2, 'Abc1')", "CHAR_NAME_INVALID_CHARACTER"),
+            ("RenameCharacter(2, 12)", "CHAR_NAME_INVALID_CHARACTER"),
+            ("RenameCharacter(2, 'Abbbc')", "CHAR_NAME_THREE_CONSECUTIVE"),
+            ("RenameCharacter(2, 'Abcdefghijklm')", "CHAR_NAME_TOO_LONG"),
+            ("RenameCharacter(2, 'Thrall')", "CHAR_NAME_RESERVED"),
+        ] {
+            s.run("FIRED = {}").unwrap();
+            assert_eq!(
+                s.eval::<(f64, Option<f64>)>(&format!(
+                    "local function n(...) return arg.n, arg[1] end return n({call})"
+                ))
+                .unwrap(),
+                (1.0, None),
+                "{call}"
+            );
+            assert_eq!(
+                fired(&s),
+                [format!("FORCE_RENAME_CHARACTER {key}")],
+                "{call}"
+            );
+        }
+        assert!(s.take_glue_calls().is_empty());
+    }
+
+    /// A passing name is the host's, and the verb answers 1 with nothing fired; a C string ends at
+    /// its NUL.
+    #[test]
+    fn rename_character_with_a_passing_name_asks_the_host() {
+        let mut s = rename_vm();
+        assert_eq!(
+            s.eval::<(f64, f64)>(
+                "local function n(...) return arg.n, arg[1] end \
+                 return n(RenameCharacter(2, 'Newname'))"
+            )
+            .unwrap(),
+            (1.0, 1.0)
+        );
+        assert_eq!(
+            s.eval::<f64>("return RenameCharacter('2', 'Zoë\\0Bravo')")
+                .unwrap(),
+            1.0
+        );
+        assert!(fired(&s).is_empty());
+        let queued = s.take_glue_calls();
+        assert!(
+            matches!(
+                queued.as_slice(),
+                [
+                    GlueCall::RenameCharacter { guid: 2, name: a },
+                    GlueCall::RenameCharacter { guid: 2, name: b },
+                ] if a == "Newname" && b == "Zoë"
+            ),
+            "{queued:?}"
+        );
+    }
+
+    /// `0x46d3c0`: the selected record's index, guid and flags go to the host and the call returns
+    /// no values; with the selection off the roster nothing goes (`0x46b53e`), and the verb fires
+    /// nothing itself.
+    #[test]
+    fn enter_world_hands_the_selected_record_to_the_host() {
+        let mut roster = three();
+        roster[1].flags = 0x4004;
+        let mut s = vm(roster);
+        s.take_glue_calls();
+        s.run("SelectCharacter(2) FIRED = {}").unwrap();
+        assert_eq!(s.eval::<f64>(&count("EnterWorld('x', 9)")).unwrap(), 0.0);
+        let queued = s.take_glue_calls();
+        assert!(
+            matches!(
+                queued.as_slice(),
+                [GlueCall::EnterWorld {
+                    index: 1,
+                    guid: 2,
+                    flags: 0x4004
+                }]
+            ),
+            "{queued:?}"
+        );
+        assert!(fired(&s).is_empty());
+
+        for mut s in [vm(Vec::new()), UiScript::new_glue().unwrap()] {
+            s.take_glue_calls();
+            assert_eq!(s.eval::<f64>(&count("EnterWorld()")).unwrap(), 0.0);
+            assert!(s.take_glue_calls().is_empty());
+        }
+    }
+
+    /// `0x4725f0` on the VM's side: the record found by guid takes the name, loses the rename flag
+    /// and keeps the rest, and `CHARACTER_LIST_UPDATE` fires; another guid changes nothing.
+    #[test]
+    fn the_rename_applier_renames_the_record_and_clears_its_flag() {
+        let mut s = rename_vm();
+        assert_eq!(s.glue_character_name(2).as_deref(), Some("Bravo"));
+        s.apply_glue_rename(9, "Nobody");
+        assert!(fired(&s).is_empty(), "no record, no event");
+        s.apply_glue_rename(2, "Newname");
+        assert_eq!(fired(&s), ["CHARACTER_LIST_UPDATE nil"]);
+        assert_eq!(
+            s.eval::<(String, Option<i64>)>(
+                "local n, _, _, _, _, _, _, ghost = GetCharacterInfo(2) return n, ghost"
+            )
+            .unwrap(),
+            ("Newname".to_string(), Some(1)),
+            "the ghost bit stays"
+        );
+        assert_eq!(s.glue_character_name(2).as_deref(), Some("Newname"));
+        // The flag is clear: a second rename is refused at `0x4735ab`.
+        assert_eq!(
+            s.eval::<f64>(&count("RenameCharacter(2, 'Othername')"))
+                .unwrap(),
+            0.0
+        );
+        assert!(s.take_glue_calls().is_empty());
     }
 
     /// `0x4724d0` with none: -1 is selected (the event carries 1), then with no realm chosen the

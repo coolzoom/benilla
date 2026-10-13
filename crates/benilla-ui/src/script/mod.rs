@@ -53,6 +53,7 @@ pub(crate) use editbox::{adopt_text_region, editbox_text_region_wrapper};
 pub(crate) mod addon;
 mod addon_enable;
 pub mod addon_gate;
+mod char_name;
 mod client;
 // iNilla: the locale `GetLocale()` answers, set from the game data.
 pub use client::set_locale;
@@ -66,17 +67,28 @@ mod follow;
 pub(crate) mod font;
 mod font_block;
 mod frame_enum;
+pub use char_name::{check_char_name, NameLists, NoNameLists, CHAR_NAME_SUCCESS};
 mod glue;
+mod glue_addons;
 mod glue_core;
+mod glue_create;
 mod glue_realm;
 mod glue_select;
 pub use glue::{VmKind, GLUE_EVENTS};
-pub use glue_core::{GlueCredentials, GlueNotice, GlueRequest, GlueServer, NoticeState};
+pub use glue_core::{
+    glue_status_key, launch_addon_url, launch_addon_url_allowed, launch_url_allowed, GlueCall,
+    GlueCredentials, GlueHost, GlueNotice, GlueRequest, GlueSignal, GlueText, NoticeState,
+    GLUE_STATUS_KEYS,
+};
+pub use glue_create::{
+    GlueCreateCatalog, GlueCreateClass, GlueCreateCounts, GlueCreateLook, GlueCreateRace,
+    GlueCreateRequest, GlueNameRow,
+};
 pub use glue_realm::{
     realm_load_classify, realm_load_stats, GlueRealm, GlueRealmCategory, GlueRealmCells,
     GlueRealmType, RealmSortKey,
 };
-pub use glue_select::{GlueCharacter, GlueSelectCells};
+pub use glue_select::{GlueCharacter, GlueScenePane, GlueSelectCells};
 mod gm_ticket;
 mod gossip;
 mod guild;
@@ -95,6 +107,9 @@ mod item_stats;
 mod item_text;
 pub mod keybind;
 mod keyboard;
+mod layer_batch;
+pub(crate) mod texel;
+pub(crate) mod use_gates;
 pub(crate) use keyboard::enable_for_script;
 pub use keyboard::{KeyUp, KeyWalk};
 mod layout;
@@ -173,8 +188,8 @@ mod worn_display;
 mod zone_text;
 
 pub use action::{ActionSlot, ActionState, ActionUse};
-pub use addon::{addon_load_context, AddOnInfo, AddonLoad};
-pub use addon_enable::EnableHash;
+pub use addon::{addon_load_context, AddOnInfo, AddonLoad, AddonReply, AddonSecurity};
+pub use addon_enable::{AddonStateFiles, EnableHash, EnableStore};
 pub use addon_message::{AddonDistribution, AddonSend};
 pub use auction::{
     AuctionBid, AuctionCategory, AuctionHighBidder, AuctionItemRow, AuctionListState, AuctionQuery,
@@ -189,7 +204,7 @@ pub use battlefield_score::{BattlefieldScoreRow, BattlefieldScores, BattlefieldS
 pub use bind_confirm::PendingEquipAnswer;
 pub use calls::{NearestMode, ScriptCall};
 pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
-pub use channel::{ChannelCommand, ZoneChannelRow};
+pub use channel::{ChannelCommand, RecruitmentPlan, RecruitmentRun, ZoneChannelRow};
 pub use char_stats::{
     weapon_subclass_skill, BankBagSlots, InvSlotView, InventorySlots, UnitCombatStats,
     BANK_BAG_SLOT_COUNT, INVENTORY_SLOT_COUNT, SKILL_DEFENSE, SKILL_UNARMED,
@@ -199,14 +214,16 @@ pub use chat_send::ChatSend;
 pub use chat_types::ChatTypeColor;
 pub use chat_window::{message_group_index, ChatWindowLook, MESSAGE_GROUPS};
 pub use container::{
-    BagAutoStore, ContainerMove, ContainerSlot, ContainerState, EnchantView, PendingWrap,
-    PetitionSlotView, RandomPropertyView, UiCursorMode,
+    BagAutoStore, ContainerMove, ContainerSlot, ContainerState, ContainerUse, EnchantView,
+    PendingWrap, PetitionSlotView, RandomPropertyView, UiCursorMode, UseArm, UseFork,
 };
 pub use craft::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
+pub use cursor::equip::{AutoEquip, BIND_WHEN_EQUIPPED};
 pub use cursor::money::coin_icon;
 pub use cursor::{
     CursorAction, CursorItem, CursorMacro, CursorMerchantItem, CursorMoney, CursorPayload,
-    CursorPetAction, CursorSpell, CursorStablePet, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
+    CursorPetAction, CursorSpell, CursorStablePet, EnchantConfirm, HeldCursor, WorldPick,
+    EQUIPMENT_BAG,
 };
 pub use cvars::{small_cull_text, sstr_to_int};
 pub use cvars::{

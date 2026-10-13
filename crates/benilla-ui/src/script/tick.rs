@@ -40,12 +40,57 @@ impl Model {
     /// ([`Model::pending_events`]) for the next tick. So a helper shared by a Lua verb and a host
     /// path, such as the cursor's clear, fires in place for the one and queues for the other.
     pub(crate) fn raise(&mut self, event: &str, args: Vec<ScriptValue>) {
-        let raised = (event.to_string(), args);
         match &mut self.verb_events {
-            Some(segment) => segment.push(raised),
-            None => self.pending_events.push(raised),
+            Some(segment) => segment.push(Raised::Event(event.to_string(), args)),
+            None => self.pending_events.push((event.to_string(), args)),
         }
     }
+
+    /// Inside a [`verb`] segment, show `payload` on the cursor to the handlers of the events
+    /// raised until [`Model::end_cursor_view`], then put back the state the segment left. A
+    /// clear raises its own events this way, as `ClearCursor` signals before it zeroes the mode
+    /// (`0x4952bf`). The host queue fires a tick later against the state then, so it takes no
+    /// view.
+    pub(crate) fn view_cursor(&mut self, payload: Option<super::cursor::CursorPayload>) {
+        if let Some(segment) = &mut self.verb_events {
+            segment.push(Raised::CursorView(payload));
+        }
+    }
+
+    /// Set or clear the client's lock on item `guid` ([`Model::item_locks`]). Inside a [`verb`]
+    /// segment the change is also recorded, so the segment's handlers see each lock as it stood
+    /// when their event was raised, as `LockItem` and `UnlockItem` set the bit before they signal
+    /// (`0x495409`, `0x495449`).
+    pub(crate) fn set_item_lock(&mut self, guid: u64, locked: bool) {
+        let was = if locked {
+            !self.item_locks.insert(guid)
+        } else {
+            self.item_locks.remove(&guid)
+        };
+        if let Some(segment) = &mut self.verb_events {
+            segment.push(Raised::Lock { guid, locked, was });
+        }
+    }
+
+    /// End the view [`Model::view_cursor`] opened.
+    pub(crate) fn end_cursor_view(&mut self) {
+        if let Some(segment) = &mut self.verb_events {
+            segment.push(Raised::EndCursorView);
+        }
+    }
+}
+
+/// What a [`verb`] segment raised, in order.
+#[derive(Debug)]
+pub(crate) enum Raised {
+    /// An event, with its arguments.
+    Event(String, Vec<ScriptValue>),
+    /// Show this payload on the cursor until the matching [`Raised::EndCursorView`].
+    CursorView(Option<super::cursor::CursorPayload>),
+    /// A lock change on item `guid`: `locked` after it, `was` before it.
+    Lock { guid: u64, locked: bool, was: bool },
+    /// Put back the cursor the segment left.
+    EndCursorView,
 }
 
 /// Run one segment of a Lua verb with the model borrowed, then fire every event it raised, in
@@ -62,10 +107,51 @@ pub(crate) fn verb<R>(lua: &Lua, body: impl FnOnce(&mut Model) -> R) -> R {
         let out = body(&mut model);
         (out, model.verb_events.take().unwrap_or_default())
     };
-    for (event, args) in raised {
-        fire_event_into(lua, &event, args);
+    // The body's lock changes are rolled back, then replayed in place as the absolute writes they
+    // were, in the reference's order against the handlers: a nested verb's change to the same item
+    // between two of them is overwritten by the later write, as the reference's later `LockItem`
+    // or `UnlockItem` would overwrite it. What the body cannot match is a read: it ran before any
+    // handler, so it never sees a handler's change.
+    {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data set");
+        for raised in raised.iter().rev() {
+            if let Raised::Lock { guid, was, .. } = *raised {
+                set_lock_bit(&mut model, guid, was);
+            }
+        }
+    }
+    // The cursors a view replaced, innermost last.
+    let mut hidden = Vec::new();
+    for raised in raised {
+        match raised {
+            Raised::Event(event, args) => fire_event_into(lua, &event, args),
+            Raised::CursorView(payload) => {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data set");
+                hidden.push(std::mem::replace(&mut model.cursor, payload));
+            }
+            Raised::EndCursorView => {
+                if let Some(real) = hidden.pop() {
+                    lua.app_data_mut::<Model>()
+                        .expect("model app_data set")
+                        .cursor = real;
+                }
+            }
+            Raised::Lock { guid, locked, .. } => {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data set");
+                set_lock_bit(&mut model, guid, locked);
+            }
+        }
     }
     out
+}
+
+/// Set item `guid`'s lock bit to `locked`, recording nothing.
+fn set_lock_bit(model: &mut Model, guid: u64, locked: bool) {
+    if locked {
+        model.item_locks.insert(guid);
+    } else {
+        model.item_locks.remove(&guid);
+    }
 }
 
 /// [`UiScript::fire_event`] for a caller holding `&Lua`, such as a Lua binding.
@@ -151,7 +237,7 @@ impl UiScript {
     /// call (`0x7075af`), so `OnAnimFinished` (`0x76cdc0`) fires here, once per arm, against the
     /// arm the last paint left. A zero advance tests nothing (`0x7074b7`).
     pub(super) fn advance_pane(&mut self, h: FrameHandle, elapsed: f32) {
-        let dt_ms = (elapsed * 1000.0).trunc().max(0.0) as u64;
+        let dt_ms = crate::widget::pane_clock_step_ms(elapsed);
         let finished = {
             let mut model = self.model_mut();
             let model = &mut *model;

@@ -14,7 +14,7 @@ use benilla_protocol::{SessionEvent, SessionEventKind};
 use bevy::ecs::system::SystemParam;
 
 use super::{
-    CharActionResultMessage, CharListMessage, CharacterLoginFailedMessage,
+    AddonInfoMessage, CharActionResultMessage, CharListMessage, CharacterLoginFailedMessage,
     CinematicTriggeredMessage, ClientControlMessage, DisconnectedMessage, DroppedOpcodes,
     EnteredWorldMessage, GameTime, GuidIndex, HomeBind, KnockBackMessage, LoggedOutMessage,
     LoginFailedMessage, LoginQueuedMessage, LoginStageMessage, NetCommands, NetHandlerApp,
@@ -29,11 +29,13 @@ pub(super) fn register(app: &mut App) {
     app.net_handler(K::LoginStage, on_login_edge)
         .net_handler(K::WorldAuthenticated, on_login_edge)
         .net_handler(K::RosterFailed, on_login_edge)
+        .net_handler(K::AddonInfo, on_login_edge)
         .net_handler(K::LoginQueued, on_login_edge)
         .net_handler(K::LoginFailed, on_login_edge)
         .net_handler(K::RealmList, on_login_edge)
         .net_handler(K::CharacterList, on_character_list)
         .net_handler(K::CharActionResult, on_login_edge)
+        .net_handler(K::CharRenamed, on_login_edge)
         .net_handler(K::CharacterLoginFailed, on_login_edge)
         .net_handler(K::CinematicTriggered, on_login_edge)
         .net_handler(K::Connected, on_connected)
@@ -49,6 +51,7 @@ pub(super) fn register(app: &mut App) {
         .net_handler(K::ServerUnixTime, on_clock)
         .net_handler(K::Reputations, on_reputations)
         .net_handler(K::ReputationDelta, on_reputation_delta)
+        .net_handler(K::ForcedReactions, on_reputations)
         .net_handler(K::ReputationVisible, on_reputations)
         .net_handler(K::BindPoint, on_player_store)
         .net_handler(K::Proficiency, on_player_store)
@@ -64,6 +67,7 @@ pub(crate) struct Edges<'w> {
     char_lists: MessageWriter<'w, CharListMessage>,
     realm_lists: MessageWriter<'w, RealmListMessage>,
     char_actions: MessageWriter<'w, CharActionResultMessage>,
+    char_renames: MessageWriter<'w, super::CharRenameMessage>,
     char_login_failures: MessageWriter<'w, CharacterLoginFailedMessage>,
     entered_world: MessageWriter<'w, EnteredWorldMessage>,
     addon_reply: ResMut<'w, super::AddonInfoReply>,
@@ -73,6 +77,7 @@ pub(crate) struct Edges<'w> {
     login_queued: MessageWriter<'w, LoginQueuedMessage>,
     world_auth: MessageWriter<'w, WorldAuthMessage>,
     roster_failed: MessageWriter<'w, RosterFailedMessage>,
+    addon_info: MessageWriter<'w, AddonInfoMessage>,
     login_failures: MessageWriter<'w, LoginFailedMessage>,
     disconnects: MessageWriter<'w, DisconnectedMessage>,
     client_control: MessageWriter<'w, ClientControlMessage>,
@@ -118,6 +123,11 @@ fn on_login_edge(In(ev): In<SessionEvent>, mut e: Edges) {
         SessionEvent::RosterFailed { epoch } => {
             e.roster_failed.write(RosterFailedMessage { epoch });
         }
+        SessionEvent::AddonInfo { records } => {
+            // Held for the screens built after it, and for the world entry's load.
+            e.addon_reply.0 = Some(records.clone());
+            e.addon_info.write(AddonInfoMessage { records });
+        }
         SessionEvent::LoginQueued { position, realm } => {
             e.login_queued.write(LoginQueuedMessage { position, realm });
         }
@@ -132,6 +142,10 @@ fn on_login_edge(In(ev): In<SessionEvent>, mut e: Edges) {
         }
         SessionEvent::CharActionResult { action, code } => {
             char_action_result(action, code, &mut e.char_actions)
+        }
+        SessionEvent::CharRenamed { result, renamed } => {
+            e.char_renames
+                .write(super::CharRenameMessage { result, renamed });
         }
         SessionEvent::CharacterLoginFailed { result } => {
             character_login_failed(result, &mut e.char_login_failures)
@@ -196,12 +210,20 @@ fn on_logged_out(In(ev): In<SessionEvent>, mut e: Edges, mut b: Bridge) {
             &mut b.self_guid,
             &mut e.logged_out,
         );
+        // The reference zeroes the forced table's count only in teardown `0x4d5360` (`0x4d5419`),
+        // whose one caller is `ShutdownGame 0x491180` (`0x4911dc`), never on a worldport. The
+        // session's end stands in for that shutdown: the table is the character's, and one left
+        // here would colour the next character's world. The server resends it at login for a
+        // saved aura (vmangos `Unit.cpp:3511` → `SpellAuras.cpp:2744-2745`).
+        b.reputations.clear_forced();
     }
 }
 
 /// The bridge's half of the session end; each window's own listener runs after it.
 fn on_disconnected(In(ev): In<SessionEvent>, mut e: Edges, mut b: Bridge) {
     if let SessionEvent::Disconnected { reason, end } = ev {
+        // The same teardown as `on_logged_out`'s.
+        b.reputations.clear_forced();
         disconnected(
             reason,
             end,
@@ -311,6 +333,9 @@ fn on_reputations(
 ) {
     match ev {
         SessionEvent::Reputations { standings } => reputations(standings, &mut b.reputations),
+        SessionEvent::ForcedReactions { reactions } => {
+            forced_reactions(reactions, &mut b.reputations)
+        }
         SessionEvent::ReputationVisible { list_id } => {
             // The chat line names the rank, so it reads the store before the flag lands.
             if let (Some(f), Some(me)) = (factions.as_deref(), self_facts(&b)) {
@@ -499,7 +524,7 @@ fn connected(
     name: String,
     billing_time_rested: u32,
     tutorial_flags: Option<Vec<u8>>,
-    addon_info: Option<Vec<String>>,
+    addon_info: Option<Vec<benilla_protocol::messages::AddonRecord>>,
     addon_reply: &mut crate::net::AddonInfoReply,
     self_guid: &mut SelfGuid,
     status: &mut NetStatus,
@@ -728,7 +753,14 @@ fn server_unix_time(unix_time: u32, clock: &mut ServerWallClock) {
 /// `SMSG_INITIALIZE_FACTIONS`: the login reputation store.
 fn reputations(standings: Vec<(u8, i32)>, reputations: &mut Reputations) {
     info!("net: reputation store ({} slots)", standings.len());
-    reputations.0 = standings;
+    reputations.slots = standings;
+}
+
+/// `SMSG_SET_FORCED_REACTIONS`: the server resends the table whole on every change, so it
+/// replaces the last one.
+fn forced_reactions(reactions: Vec<(u32, u32)>, reputations: &mut Reputations) {
+    info!("net: forced reactions ({} factions)", reactions.len());
+    reputations.set_forced(reactions);
 }
 
 /// `SMSG_SET_FACTION_STANDING`: overwrites the changed slots, growing the store with flags 0,
@@ -743,12 +775,12 @@ fn reputation_delta(
         let Some(i) = reputation_slot(list_id, "SMSG_SET_FACTION_STANDING") else {
             continue;
         };
-        if reputations.0.len() <= i {
-            reputations.0.resize(i + 1, (0, 0));
+        if reputations.slots.len() <= i {
+            reputations.slots.resize(i + 1, (0, 0));
         }
-        reputations.0[i].1 = standing;
-        if reputations.0[i].0 & flag::HIDDEN == 0 {
-            reputations.0[i].0 |= flag::VISIBLE;
+        reputations.slots[i].1 = standing;
+        if reputations.slots[i].0 & flag::HIDDEN == 0 {
+            reputations.slots[i].0 |= flag::VISIBLE;
         }
     }
     // Standing feeds questgiver status (`SatisfyQuestReputation`); the reference re-asks here too.
@@ -761,10 +793,10 @@ fn reputation_visible(list_id: u32, reputations: &mut Reputations) {
     let Some(i) = reputation_slot(list_id, "SMSG_SET_FACTION_VISIBLE") else {
         return;
     };
-    if reputations.0.len() <= i {
-        reputations.0.resize(i + 1, (0, 0));
+    if reputations.slots.len() <= i {
+        reputations.slots.resize(i + 1, (0, 0));
     }
-    reputations.0[i].0 |= benilla_formats::faction_flags::VISIBLE;
+    reputations.slots[i].0 |= benilla_formats::faction_flags::VISIBLE;
 }
 
 /// A wire `repListId` as a store index, or `None` (logged) past the `FACTION_LIST_LEN` array
@@ -883,5 +915,75 @@ mod teardown_tests {
         assert_eq!(guid, Some(7));
         assert!(reason.is_some());
         assert!(avatar);
+    }
+}
+
+#[cfg(test)]
+mod forced_reaction_tests {
+    use super::*;
+    use crate::net::handlers::dispatch;
+    use benilla_protocol::SessionEnd;
+
+    /// The registered session handlers over the plugin's own resources.
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_plugins(crate::net::NetPlugin { connect: false })
+            .init_resource::<crate::spell::Cooldowns>()
+            .init_resource::<crate::ui_chat::ChatLog>();
+        app
+    }
+
+    fn forced(app: &App) -> Vec<(u32, u32)> {
+        app.world().resource::<Reputations>().forced.clone()
+    }
+
+    fn arrive(app: &mut App, table: &[(u32, u32)]) {
+        let ev = SessionEvent::ForcedReactions {
+            reactions: table.to_vec(),
+        };
+        dispatch(app.world_mut(), vec![ev]);
+    }
+
+    /// The server resends the table whole on every change, and an aura's removal sends it empty
+    /// (vmangos `ReputationMgr::SendForceReactions`): each arrival replaces the last, and the
+    /// standings beside it stay.
+    #[test]
+    fn each_arrival_replaces_the_table_and_an_empty_one_clears_it() {
+        let mut app = app();
+        dispatch(
+            app.world_mut(),
+            vec![SessionEvent::Reputations {
+                standings: vec![(0x20, 5)],
+            }],
+        );
+        arrive(&mut app, &[(28, 4), (72, 6)]);
+        assert_eq!(forced(&app), [(28, 4), (72, 6)]);
+        arrive(&mut app, &[(28, 2)]);
+        assert_eq!(forced(&app), [(28, 2)], "replaced, not merged");
+        arrive(&mut app, &[]);
+        assert!(forced(&app).is_empty(), "an empty table clears it");
+        assert_eq!(
+            app.world().resource::<Reputations>().slots,
+            [(0x20, 5)],
+            "the standings are not the table's"
+        );
+    }
+
+    /// The table is the character's: the session's end drops it, on a logout and on a disconnect.
+    #[test]
+    fn the_session_end_clears_the_table() {
+        for end in [
+            SessionEvent::LoggedOut,
+            SessionEvent::Disconnected {
+                reason: "gone".into(),
+                end: SessionEnd::LoggedOut,
+            },
+        ] {
+            let mut app = app();
+            arrive(&mut app, &[(28, 4)]);
+            assert_eq!(forced(&app).len(), 1);
+            dispatch(app.world_mut(), vec![end.clone()]);
+            assert!(forced(&app).is_empty(), "{end:?} left the table");
+        }
     }
 }

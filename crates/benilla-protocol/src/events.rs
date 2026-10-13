@@ -150,6 +150,13 @@ pub enum SessionEvent {
         epoch: u64,
         generation: u64,
     },
+    /// `SMSG_ADDON_INFO` was read (the handler `0x5b4260`, which rebuilds the AddOn index with
+    /// `0x51da70` and then calls the listener slot `0x80a400`, `0x5ab2f0`, whose one effect is
+    /// `ADDON_LIST_UPDATE`): its records, each named for the addon we sent in that place. Emitted
+    /// by the IO thread once per world session, never wire-decoded.
+    AddonInfo {
+        records: Vec<crate::messages::AddonRecord>,
+    },
     /// A roster ask on the parked session failed on the stream (`0x5ab300`'s failure leg,
     /// `SetStatus(0, 0x2c)`, `CHAR_LIST_FAILED`); the session ends after it. Emitted by the IO
     /// thread, never wire-decoded.
@@ -181,6 +188,12 @@ pub enum SessionEvent {
     },
     /// `SMSG_CHAR_CREATE`/`_DELETE`'s raw `WorldResult`; on success a fresh roster comes first.
     CharActionResult { action: CharAction, code: u8 },
+    /// `SMSG_CHAR_RENAME`'s result byte and, on success, the renamed guid and new name; emitted
+    /// by the IO thread at character select, never wire-decoded.
+    CharRenamed {
+        result: u8,
+        renamed: Option<(u64, String)>,
+    },
     /// We are in the world; the IO thread emits this before any object update.
     Connected {
         self_guid: u64,
@@ -189,9 +202,9 @@ pub enum SessionEvent {
         billing_time_rested: u32,
         /// `SMSG_TUTORIAL_FLAGS` if it came during the handshake; `None` if it comes in-world.
         tutorial_flags: Option<Vec<u8>>,
-        /// The addons `SMSG_ADDON_INFO` hid. `None` is no reply at all, where the reference's
+        /// The `SMSG_ADDON_INFO` records. `None` is no reply at all, where the reference's
         /// `GetNumAddOns()` answers 0; an empty list is a reply that hid nothing.
-        addon_info: Option<Vec<String>>,
+        addon_info: Option<Vec<crate::messages::AddonRecord>>,
     },
     /// Our pick was refused (`SMSG_CHARACTER_LOGIN_FAILED`) after [`Self::Connected`] was sent;
     /// `result` is a 1-based index into the reference's six `CHAR_LOGIN_*` strings.
@@ -397,6 +410,9 @@ pub enum SessionEvent {
     Reputations { standings: Vec<(u8, i32)> },
     /// `SMSG_SET_FACTION_STANDING`: `(reputationListId, standing)` per slot, base excluded.
     ReputationDelta { standings: Vec<(u32, i32)> },
+    /// `SMSG_SET_FORCED_REACTIONS`: `(Faction.dbc id, reaction rank)`, the whole table replacing
+    /// the last. The reaction resolvers read it ahead of the faction rules.
+    ForcedReactions { reactions: Vec<(u32, u32)> },
     /// `SMSG_SET_FACTION_VISIBLE`: sets the slot's visible flag, which decides if it is listed.
     ReputationVisible { list_id: u32 },
     /// `SMSG_NAME_QUERY_RESPONSE`: names are never descriptor fields in 1.12, only query answers.
@@ -571,6 +587,9 @@ pub enum SessionEvent {
         reason: u8,
         required_level: Option<u32>,
         item_guid: u64,
+        /// The second item the refused operation named, or 0; the client unlocks both
+        /// (`0x5e3ac0`, `0x5e3ad3`).
+        item2_guid: u64,
         /// The destination bag's absolute player slot, reason 16's `%s`; 255 is the player's own.
         bag_slot: u8,
     },
@@ -835,8 +854,9 @@ pub enum SessionEvent {
     LootMoneyNotify { amount: u32 },
     /// The coin line disappears for every current looter (`SMSG_LOOT_CLEAR_MONEY`).
     LootClearMoney,
-    /// The loot window closes (`SMSG_LOOT_RELEASE_RESPONSE`), answering our `CMSG_LOOT_RELEASE`.
-    LootReleaseResponse { guid: u64 },
+    /// A loot release (`SMSG_LOOT_RELEASE_RESPONSE`), answering a `CMSG_LOOT_RELEASE`; `result`
+    /// is the wire byte, which the client reads as a gate.
+    LootReleaseResponse { guid: u64, result: u8 },
     /// A group roll opened on one drop (`SMSG_LOOT_START_ROLL`); its `rollID` is client-allocated.
     LootStartRoll(LootStartRoll),
     /// A vote or dice (`SMSG_LOOT_ROLL`); `LootRoll::is_dice`/`vote` split the overloaded pair.
