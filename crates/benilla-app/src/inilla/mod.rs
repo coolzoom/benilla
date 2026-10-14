@@ -70,6 +70,15 @@ pub(crate) fn touch_device() -> bool {
     cfg!(target_os = "ios") || std::env::var("INILLA_TOUCH").as_deref() == Ok("1")
 }
 
+/// Whether the OS can show an on-screen keyboard over this window. Wider than [`touch_device`]:
+/// Android runs the layer's own HUD rather than iNilla's, but its credential and character boxes
+/// are drawn by the app all the same, and winit's `ime_enabled` is the one switch both platforms
+/// answer to (`show_soft_input`/`becomeFirstResponder` in `winit::platform_impl`).
+pub(crate) fn soft_keyboard_platform() -> bool {
+    cfg!(any(target_os = "android", target_os = "ios"))
+        || std::env::var("INILLA_TOUCH").as_deref() == Ok("1")
+}
+
 pub(crate) struct InillaPlugin;
 
 impl Plugin for InillaPlugin {

@@ -841,8 +841,15 @@ fn login_input(
     mut sounds: MessageWriter<GlueSound>,
     mut quit: Local<bool>,
     mut commands: Commands,
+    mut front: ResMut<crate::textinput::FrontText>,
     time: Res<Time>,
 ) {
+    // [iNilla] A phone shows its keyboard for the boxes this screen draws itself: the credential
+    // boxes, which are live unless a dialog has taken the screen, and the realmlist editor's
+    // address box, the one dialog that has a field. The realm list draws its own address box and
+    // answers for itself, so this screen says nothing while it is up — and it returns below.
+    front.wants_keyboard = !realms.owns_input() && dialog.kind.is_none_or(|k| k.has_edit_box());
+
     // The reference's `RealmList` is a DIALOG-strata frame over this screen, so while it is up
     // everything here is inert, Escape included (it is the list's Cancel), through the frame
     // its own Escape closes it in.

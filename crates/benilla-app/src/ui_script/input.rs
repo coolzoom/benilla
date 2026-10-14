@@ -218,6 +218,7 @@ pub(super) fn feed_ui_input(
     // ── Keyboard capture gate ── read after the mouse feed (a click may have just focused a box)
     // and before the keys (an Escape that clears focus still counts as captured this frame).
     capture.typing = script.has_keyboard_focus();
+    capture.host_text = super::front_host_text(&script);
     capture.consumed.clear();
     script.set_alt_down(alt);
     // ── The alt-arrow exemption ────────────────────────────────────────────────────────────────

@@ -353,7 +353,10 @@ fn create_input(
     mut next: ResMut<NextState<ClientState>>,
     mut sounds: MessageWriter<GlueSound>,
     mut rng: Local<u64>,
+    mut front: ResMut<textinput::FrontText>,
 ) {
+    // [iNilla] The name box is this screen's one field, live while the screen is.
+    front.wants_keyboard = true;
     let mods = textinput::mods_now(&keys);
     let wl = textinput::wayland_display(raw_handle.iter().next());
     // The create screen has one field and no focus model, so it is always focused while up.

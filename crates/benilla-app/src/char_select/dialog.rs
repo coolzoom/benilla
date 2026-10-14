@@ -20,6 +20,15 @@ use crate::sound::GlueSound;
 
 use super::wow_font;
 
+/// [iNilla] The confirm box wants the phone's keyboard while this dialog is up. Its own system: the
+/// driver above is already at Bevy's parameter ceiling, and this is two reads.
+pub(super) fn publish_delete_keyboard(
+    dialog: Res<DeleteDialog>,
+    mut front: ResMut<crate::textinput::FrontText>,
+) {
+    front.wants_keyboard = dialog.open;
+}
+
 /// The delete dialog's state.
 #[derive(Resource, Default)]
 pub(super) struct DeleteDialog {

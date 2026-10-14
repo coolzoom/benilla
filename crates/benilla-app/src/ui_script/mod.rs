@@ -112,6 +112,20 @@ pub(crate) struct UiCostWanted(pub(crate) bool);
 #[derive(Resource, Default)]
 pub(crate) struct PlayerUiHover(pub(crate) Option<u32>);
 
+/// [iNilla] Whether the VM has a text box up that a phone should type into, for the screens drawn
+/// from the player's own GlueXML: the stock `AccountLogin` and `CharCustomize` boxes and the
+/// delete-confirm dialog's. The three names are the stock files' (`GlueXML`), each a real EditBox
+/// the reference focuses on show; a frame that is not there answers false.
+fn front_host_text(script: &UiScript) -> bool {
+    [
+        "AccountLoginEditBox",
+        "CharacterNameEditBox",
+        "DialogEditBox",
+    ]
+    .iter()
+    .any(|name| script.frame_visible(name))
+}
+
 /// Who owns this frame's keys (the client's `DAT_00cf4dc8 != 0` gate), written in [`UiInput`] and
 /// read after it: a focused EditBox takes every key, a shown keyboard-enabled frame only the key
 /// it ate. Neither releases a held key: only the window deactivate (`0x514490`, from `0x493058`)
@@ -127,6 +141,12 @@ pub(crate) struct UiKeyboardCapture {
     /// The arrows fall through: the focused box is in alt-arrow mode and ALT is up, so the
     /// reference declines them at `0x77b1c4` and `CGWorldFrame` runs their bindings.
     pub(crate) arrows_fall_through: bool,
+    /// [iNilla] A text box of this VM is up on a screen a phone types into: the stock glue screens'
+    /// `AccountLoginEditBox` (the credential boxes), `CharacterNameEditBox` (create) and the
+    /// `DialogFrame`'s box (the delete confirmation's `DELETE_CONFIRM_STRING`). Read by
+    /// [`crate::inilla`] to open the soft keyboard. Not `typing`: under `stock_glue` the host feeds
+    /// no keys, so nothing is focused through the walk and `typing` stays false with those boxes up.
+    pub(crate) host_text: bool,
 }
 
 /// A left press the UI consumed without hitting a frame (a payload dropped on empty world), which

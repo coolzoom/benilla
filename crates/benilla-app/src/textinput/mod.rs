@@ -24,7 +24,11 @@ impl Plugin for TextInputPlugin {
     fn build(&self, app: &mut App) {
         // Held for the whole run: on X11 dropping the handle clears the clipboard. `NonSend`: no
         // backend is `Sync`, and NSPasteboard is main-thread-only.
-        app.init_non_send_resource::<HostClipboard>();
+        app.init_non_send_resource::<HostClipboard>()
+            .init_resource::<FrontText>()
+            // Cleared at the top of every frame; the screen in front re-asserts it in `Update`, so
+            // a screen that stops running (entering the world) leaves nothing behind.
+            .add_systems(PreUpdate, clear_front_text);
     }
 }
 
@@ -132,6 +136,22 @@ pub(crate) fn feed_key(
         }
     }
     FieldKey::Passthrough
+}
+
+/// Whether a benilla-drawn text box is on the front screen and accepts typing right now: the login
+/// form's account and password boxes, the character screen's name box, the delete confirmation.
+/// [iNilla] The 1.12 client has no such bit: its glue screens are GlueXML, so their EditBoxes
+/// report through [`crate::ui_script::UiKeyboardCapture::typing`], and only the in-world pass
+/// writes that. This carries the same fact for the boxes the app draws itself, which is what the
+/// phone's on-screen keyboard follows ([`crate::inilla`] reads it). No screen clears it: two
+/// screens are never both live, so the writer of the front one decides.
+#[derive(Resource, Default)]
+pub(crate) struct FrontText {
+    pub(crate) wants_keyboard: bool,
+}
+
+fn clear_front_text(mut front: ResMut<FrontText>) {
+    front.wants_keyboard = false;
 }
 
 /// A fresh single-line field with `max_letters` (0 = unlimited) and optional password masking.

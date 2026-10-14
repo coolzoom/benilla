@@ -78,13 +78,16 @@ impl Plugin for PlatformPlugin {
                     lock_landscape,
                     keep_screen_awake,
                     audio_session,
-                    keyboard_policy.after(crate::ui_script::UiInput),
                     apply_cvar_settings,
                     compact_stock_ui.after(crate::ui_script::UiInput),
                     clear_the_island.after(crate::ui_script::UiInput),
                 ),
             )
-            .add_systems(Last, frame_cap);
+            // [iNilla] After every writer: `FrontText` is cleared in `PreUpdate` and re-asserted
+            // by whichever screen is in front, anywhere in `Update`, so reading it in `Update`
+            // (ordered only against `UiInput`) sees the cleared value. The window's IME flag is a
+            // frame-boundary fact anyway.
+            .add_systems(Last, (keyboard_policy, frame_cap));
     }
 }
 
@@ -268,24 +271,65 @@ fn audio_session(state: Res<Inilla>, mut last: Local<Option<(bool, bool)>>) {
     }
 }
 
-/// Show the keyboard while a text box has focus (chat, the stock popups) or a HUD button asked.
+/// Show the keyboard while a text box has it: the in-world VM's (`typing`), a stock glue screen's
+/// (`host_text`), a box the app draws itself ([`crate::textinput::FrontText`]), or a HUD button's
+/// explicit ask ([`KeyboardRequest`], for the chat bar, whose send the phone's keyboard has no key
+/// for).
 fn keyboard_policy(
     state: Res<Inilla>,
     capture: Res<UiKeyboardCapture>,
+    front: Res<crate::textinput::FrontText>,
     request: Res<KeyboardRequest>,
+    // Android only, with the ask below: iOS opens the keyboard from the window's own
+    // `becomeFirstResponder`, which winit drives.
+    #[cfg(target_os = "android")] time: Res<Time>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mut last: Local<bool>,
+    #[cfg(target_os = "android")] mut retry: Local<f32>,
 ) {
-    if !super::touch_device() {
+    if !super::soft_keyboard_platform() {
         return;
     }
-    let want = request.0 || (state.settings.auto_keyboard && capture.typing);
-    if want == *last {
-        return;
+    let want = request.0
+        || (state.settings.auto_keyboard
+            && (capture.typing || capture.host_text || front.wants_keyboard));
+    let changed = want != *last;
+    if changed {
+        *last = want;
+        for mut w in &mut windows {
+            w.ime_enabled = want;
+        }
     }
-    *last = want;
-    for mut w in &mut windows {
-        w.ime_enabled = want;
+    // [iNilla] Android needs two calls winit does not make, and the ask repeated while the
+    // keyboard is wanted. winit's `set_ime_allowed` asks for `SHOW_SOFT_INPUT_IMPLICIT`, which the
+    // framework honours only once the user has shown the keyboard from the system bar — never at a
+    // fresh launch, which is every launch here. `InputMethodManager::showSoftInput` then reports
+    // nothing unless the window has an `EditorInfo` saying it takes text, which a `NativeActivity`
+    // has none of: a `SurfaceView` that draws its own boxes is not an `EditText`; that record is
+    // `set_ime_editor_info`. And the ask itself is dropped without a word when the window does not
+    // hold the focus yet, which is the first frames: the login screen is up before the window is,
+    // so a screen that wants the keyboard every frame re-asks until the framework takes it. iOS
+    // needs none of this: `becomeFirstResponder` is a direct request there.
+    #[cfg(target_os = "android")]
+    if let Some(app) = bevy::android::ANDROID_APP.get() {
+        use bevy::android::android_activity::input::{ImeOptions, InputType, TextInputAction};
+        if !want {
+            if changed {
+                app.hide_soft_input(false);
+            }
+            return;
+        }
+        let now = time.elapsed_secs();
+        if !changed && now < *retry {
+            return;
+        }
+        *retry = now + 0.5;
+        app.set_ime_editor_info(
+            InputType::TYPE_CLASS_TEXT,
+            TextInputAction::Done,
+            ImeOptions::empty(),
+        );
+        app.show_soft_input(false);
     }
 }
 

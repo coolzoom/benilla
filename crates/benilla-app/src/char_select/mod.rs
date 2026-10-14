@@ -106,6 +106,7 @@ impl Plugin for CharSelectPlugin {
                         input::rotate_model.run_if(crate::ui_script::glue::native_glue),
                         debug_select_dialog,
                         dialog::drive_delete_dialog.run_if(crate::ui_script::glue::native_glue),
+                        dialog::publish_delete_keyboard,
                         // Ahead of the dialog driver, so a refused delete shows the frame it lands.
                         delete_result,
                         // The one `GlueDialog`: here, the refused login and the refused delete.
