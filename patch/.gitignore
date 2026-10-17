@@ -1,0 +1,12 @@
+# Generated or derived from a WoW install: never committed (the MPQ carries patched stock DBCs).
+.venv/
+__pycache__/
+.pytest_cache/
+build/
+ref/
+backup/
+logs/
+client/*.MPQ
+server/maps/
+server/vmaps/
+server/mmaps/

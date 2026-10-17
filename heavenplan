@@ -1,0 +1,7 @@
+请参考/Users/mac/Downloads/git/wowdecomp/heavenplan，我想对该项目进行一模一样的创作。
+该代码已经将335所需资源脚本放置在/Users/mac/Downloads/git/wowdecomp/patch目录，可供参考。
+
+请对现有112源码进行同样创作修改，所有文件请放置在patch目录。
+客户端项目源码：本目录
+服务端源码：/Users/mac/Downloads/git/wow1121cn/vmangos
+客户端执行文件：/Users/mac/Downloads/git/wow1121cn

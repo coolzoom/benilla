@@ -184,7 +184,8 @@ configure_server() {
     local input cur_host cur_user
     cur_host="${WOW_HOST:-localhost:3724}"
     cur_user="${WOW_USER:-}"
-    echo "  服务器默认 localhost:3724。账号留空则在登录界面输入。"
+    echo "  服务器默认 localhost:3724，登录界面的 Realmlist 可以再改。"
+    echo "  账号留空则在登录界面输入。"
     printf '  地址 [%s]: ' "$cur_host"
     read -r input
     WOW_HOST="${input:-$cur_host}"
@@ -270,7 +271,13 @@ configure() {
 
 export_run_env() {
     load_env
-    export WOW_HOST="${WOW_HOST:-localhost:3724}"
+    # `$WOW_HOST` disables the login Realmlist for the whole session. The address
+    # saved here is only the starting value (`$WOW_REALMLIST`); the player edits
+    # it on the login screen. Same choice as android.sh's device env.
+    if [ -n "${WOW_HOST:-}" ]; then
+        export WOW_REALMLIST="$WOW_HOST"
+    fi
+    unset WOW_HOST
     if [ -n "${WOW_DATA:-}" ]; then
         export WOW_DATA
     fi
@@ -335,7 +342,11 @@ run_client() {
         echo "还没有可运行的程序。先选 2 编译。"
         return 1
     fi
-    echo "服务器: $WOW_HOST"
+    if [ -n "${WOW_REALMLIST:-}" ]; then
+        echo "服务器: $WOW_REALMLIST（登录界面可改）"
+    else
+        echo "服务器: 登录界面填写"
+    fi
     if [ -n "${WOW_USER:-}" ]; then
         echo "账号: $WOW_USER"
     else

@@ -7,7 +7,9 @@
 //! config file.
 //!
 //! `$WOW_HOST` wins for the session, is never written to the file, and is taken verbatim, not
-//! through [`normalize`].
+//! through [`normalize`]: the login control is disabled while it is set. `$WOW_REALMLIST` is only
+//! the starting address (`dev.sh` passes the one from its menu this way). The control stays
+//! editable, and a later edit is saved.
 
 use bevy::prelude::*;
 
@@ -53,6 +55,7 @@ pub(crate) const MAX_LETTERS: usize = 64;
 pub(crate) struct Realmlist {
     address: String,
     /// `$WOW_HOST` owns this session: the address shows, the control is disabled, nothing persists.
+    /// `$WOW_REALMLIST` fills `address` without setting this.
     pinned_by_env: bool,
     /// The last `realmList` value that was not an address, for the stock login screen's
     /// realmlist dialog to reopen on ([`crate::ui_script::glue_mgr`]).
@@ -61,20 +64,34 @@ pub(crate) struct Realmlist {
 
 impl Default for Realmlist {
     fn default() -> Self {
-        match std::env::var("WOW_HOST") {
-            // Verbatim, not normalized.
-            Ok(host) if !host.trim().is_empty() => Realmlist {
+        // Verbatim, not normalized. `$WOW_HOST` pins; `$WOW_REALMLIST` only seeds.
+        if let Some(host) = env_host("WOW_HOST") {
+            return Realmlist {
                 address: host,
                 pinned_by_env: true,
                 refused: None,
-            },
-            _ => Realmlist {
-                address: DEFAULT_REALMLIST.to_string(),
+            };
+        }
+        if let Some(host) = env_host("WOW_REALMLIST") {
+            return Realmlist {
+                address: host,
                 pinned_by_env: false,
                 refused: None,
-            },
+            };
+        }
+        Realmlist {
+            address: DEFAULT_REALMLIST.to_string(),
+            pinned_by_env: false,
+            refused: None,
         }
     }
+}
+
+/// A non-empty value of `key`, or `None`. Whitespace alone does not count.
+fn env_host(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .filter(|host| !host.trim().is_empty())
 }
 
 impl Realmlist {
@@ -248,6 +265,28 @@ mod tests {
         };
         r.set("somewhere.else.org");
         assert_eq!(r.address(), "harness.example.org");
+        assert!(r.pinned_by_env());
+    }
+
+    #[test]
+    fn a_starting_realmlist_stays_editable() {
+        let _lock = crate::local_state::test_env::ENV_LOCK.lock().unwrap();
+        let _host = crate::local_state::test_env::EnvGuard::unset("WOW_HOST");
+        let _list =
+            crate::local_state::test_env::EnvGuard::set("WOW_REALMLIST", "logon.example.org:3724");
+        let r = Realmlist::default();
+        assert_eq!(r.address(), "logon.example.org:3724");
+        assert!(!r.pinned_by_env());
+    }
+
+    #[test]
+    fn wow_host_still_pins_over_a_starting_realmlist() {
+        let _lock = crate::local_state::test_env::ENV_LOCK.lock().unwrap();
+        let _host = crate::local_state::test_env::EnvGuard::set("WOW_HOST", "pinned.example.org");
+        let _list =
+            crate::local_state::test_env::EnvGuard::set("WOW_REALMLIST", "editable.example.org");
+        let r = Realmlist::default();
+        assert_eq!(r.address(), "pinned.example.org");
         assert!(r.pinned_by_env());
     }
 

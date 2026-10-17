@@ -260,7 +260,11 @@ fn touch_to_mouse(
                 }
             }
             Role::Look => {
-                let looks = pointer.roles.iter().filter(|r| r.role == Role::Look).count();
+                let looks = pointer
+                    .roles
+                    .iter()
+                    .filter(|r| r.role == Role::Look)
+                    .count();
                 if looks >= 2 {
                     let mut fingers = pointer
                         .roles
