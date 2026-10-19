@@ -5,4 +5,4 @@ INSERT INTO `map_template` (`entry`, `patch`, `parent`, `map_type`, `linked_zone
 DELETE FROM `area_template` WHERE `entry` = 4988;
 INSERT INTO `area_template` (`entry`, `map_id`, `zone_id`, `explore_flag`, `flags`, `area_level`, `name`, `team`, `liquid_type`) VALUES (4988, 800, 0, 2000, 64, 60, '天宫云阙', 0, 0);
 DELETE FROM `game_tele` WHERE `id` = 8800 OR `name` = 'tiangong';
-INSERT INTO `game_tele` (`id`, `position_x`, `position_y`, `position_z`, `orientation`, `map`, `name`) VALUES (8800, -606.149, -462.667, 120.500, 0.5236, 800, 'tiangong');
+INSERT INTO `game_tele` (`id`, `position_x`, `position_y`, `position_z`, `orientation`, `map`, `name`) VALUES (8800, -1996.916, -1378.333, 160.500, 0.5236, 800, 'tiangong');

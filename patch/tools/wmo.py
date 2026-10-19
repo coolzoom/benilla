@@ -83,16 +83,19 @@ def _bsp(verts, tris, face_ids, box_min, box_max, nodes, refs, depth=0):
         nodes[idx] = (4, 0xFFFF, 0xFFFF, len(face_ids), len(refs), 0.0)
         refs.extend(face_ids)
         return idx
-    ext = box_max - box_min
-    axis = int(np.argmax(ext))
-    tri_min = verts[tris[face_ids]].min(axis=1)[:, axis]
-    tri_max = verts[tris[face_ids]].max(axis=1)[:, axis]
-    split = float(np.median((tri_min + tri_max) * 0.5))
-    if not (box_min[axis] < split < box_max[axis]):
-        split = float((box_min[axis] + box_max[axis]) * 0.5)
-    neg = [f for f, lo in zip(face_ids, tri_min) if lo <= split]
-    pos = [f for f, hi in zip(face_ids, tri_max) if hi >= split]
-    if len(neg) == len(face_ids) and len(pos) == len(face_ids):
+    corners = verts[tris[face_ids]]
+    # Longest axis first; the others when every face straddles its split.
+    for axis in np.argsort(box_max - box_min)[::-1].tolist():
+        tri_min = corners.min(axis=1)[:, axis]
+        tri_max = corners.max(axis=1)[:, axis]
+        split = float(np.median((tri_min + tri_max) * 0.5))
+        if not (box_min[axis] < split < box_max[axis]):
+            split = float((box_min[axis] + box_max[axis]) * 0.5)
+        neg = [f for f, lo in zip(face_ids, tri_min) if lo <= split]
+        pos = [f for f, hi in zip(face_ids, tri_max) if hi >= split]
+        if len(neg) < len(face_ids) or len(pos) < len(face_ids):
+            break
+    else:
         nodes[idx] = (4, 0xFFFF, 0xFFFF, len(face_ids), len(refs), 0.0)
         refs.extend(face_ids)
         return idx

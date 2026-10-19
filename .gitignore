@@ -51,3 +51,4 @@ __pycache__/
 # beside `WoW`, or `BENILLA_ADDON_CORPUS`.
 /wow-addons-vanilla
 _setup.log
+/patch/scenes/tiangong/models/incoming
