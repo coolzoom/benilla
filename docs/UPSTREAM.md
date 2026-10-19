@@ -46,6 +46,7 @@ Every upstream file iNilla changes, and why. Each change is marked `iNilla` in a
 | `crates/benilla-formats/src/chain.rs`, `lib.rs` | `Chain::open` notes the install's language off `ChrRaces.dbc`; `Chain::read` localizes `.dbc` files of a non-English install; `data_locale()` |
 | `crates/benilla-protocol/src/auth.rs` | `set_client_locale`: the logon challenge reports the game data's language instead of a fixed `enUS` |
 | `crates/benilla-ui/src/script/client.rs`, `mod.rs`, `stdlib.rs` | `set_locale`: `GetLocale()` answers the game data's language; the stdlib's fixed `enUS` only fills in when nothing registered one |
+| `crates/benilla-app/src/cloud_sea.rs`, `cloud_sea.wgsl` (new), `lib.rs`, `game_plugins.rs`, `volumetric_light.rs` | the cloud sea: a ray-marched volumetric cloud pass between the fog and the light shafts, drawn only on the custom maps its `SEAS` table names (`patch/` scenes); `VolLightLabel` is `pub(crate)` so the pass can order itself before it |
 | `crates/benilla-app/src/addon_harness/render_tests.rs`, `use_probe_tests.rs` | the two tests whose fixtures are symlinks are `cfg(unix)`, so the app's tests build on Windows |
 | `crates/benilla-ui/src/script/client.rs`, `script/model.rs`, `strings.rs`, `script/tooltip_item/render.rs` | `SetEuropeanNumbers`, which the German `Localization.lua` calls at `VARIABLES_LOADED`: `strings::decimal` / `fill_with` write the tooltips' reals (speed, DPS, ammo, cast time, cooldown) with a comma |
 

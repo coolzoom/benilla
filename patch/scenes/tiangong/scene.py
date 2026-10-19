@@ -563,59 +563,6 @@ def build_beams():
     return m
 
 
-def _card(m, c, half, mat, normal, spin):
-    n = np.asarray(normal, dtype=np.float64)
-    n /= np.linalg.norm(n)
-    up = np.array([0.0, 0.0, 1.0]) if abs(n[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
-    e1 = np.cross(up, n)
-    e1 /= np.linalg.norm(e1)
-    e2 = np.cross(n, e1)
-    e1, e2 = math.cos(spin) * e1 + math.sin(spin) * e2, -math.sin(spin) * e1 + math.cos(spin) * e2
-    c = np.asarray(c, dtype=np.float64)
-    geom.quad(m, c - e1 * half[0] - e2 * half[1], c + e1 * half[0] - e2 * half[1], c + e1 * half[0] + e2 * half[1],
-              c - e1 * half[0] + e2 * half[1], mat, flags=DECOR, normal=tuple(n))
-
-
-def build_clouds():
-    """Sea of clouds strictly below the terrace (nothing between the viewer and the palace), billows flanking the
-    palace away from the sight lines, and backlit cloud banks on the sun side with gaps the light shafts pour from."""
-    m = Mesh()
-    rng = np.random.default_rng(99)
-    for k in range(110):
-        lx, ly = rng.uniform(-800, 750), rng.uniform(-800, 800)
-        z = rng.uniform(25, 108)
-        s = rng.uniform(60, 160)
-        _card(m, (lx, ly, z), (s, s * rng.uniform(0.6, 1.0)), CLOUD if k % 2 else CLOUD2, (0, 0, 1),
-              rng.uniform(0, math.pi))
-    placed = 0
-    while placed < 30:
-        lx, ly = rng.uniform(-300, 700), rng.uniform(-700, 700)
-        if abs(ly) < 190 and lx < 330:
-            continue
-        s = rng.uniform(50, 110)
-        _card(m, (lx, ly, rng.uniform(118, 165)), (s, s * 0.7), CLOUD if placed % 2 else CLOUD2, (0, 0, 1),
-              rng.uniform(0, math.pi))
-        placed += 1
-    axes = [(np.array(t, dtype=np.float64), w) for t, w in RAY_TARGETS]
-    placed = 0
-    for _ in range(4000):
-        if placed >= 46:
-            break
-        t, w = axes[rng.integers(len(axes))]
-        c = t + SUN_DIR * rng.uniform(260, 520) + rng.normal(0, 1, 3) * [60, 120, 50]
-        s = rng.uniform(55, 120)
-        to_eye = EYE - c
-        dist_eye = np.linalg.norm(to_eye)
-        if c[2] < 230 or dist_eye > 1150 or np.dot(-to_eye / dist_eye, SUN_DIR) > math.cos(math.radians(4.0)):
-            continue
-        gap = min(np.linalg.norm(np.cross(c - p, SUN_DIR)) - ww * 0.65 for p, ww in axes)
-        if gap < s * 0.45:
-            continue
-        _card(m, c, (s, s * 0.55), RIM, to_eye, rng.uniform(-0.25, 0.25))
-        placed += 1
-    return m
-
-
 PIECES = [
     ("tg_gate", build_gate),
     ("tg_bridge", build_bridge),
@@ -625,7 +572,6 @@ PIECES = [
     ("tg_phoenix", build_phoenix),
     ("tg_deity", build_deity),
     ("tg_beams", build_beams),
-    ("tg_clouds", build_clouds),
 ]
 
 

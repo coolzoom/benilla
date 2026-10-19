@@ -178,6 +178,8 @@ impl PluginGroup for GamePlugins {
             .add(crate::volumetric_fog::VolumetricFogPlugin)
             // GFX (volumetric light): after the fog plugin, whose graph node it follows.
             .add(crate::volumetric_light::VolumetricLightPlugin)
+            // iNilla (cloud sea): custom maps' volumetric clouds, between the fog and the shafts.
+            .add(crate::cloud_sea::CloudSeaPlugin)
             // MONKEY (p0 graphics programme): the programme's cvar bridges (skyDither, ...).
             .add(crate::monkey_gfx::MonkeyGfxPlugin)
             // MONKEY (post): world-only HDR effects, before the legacy FFX clamp/UI composite.

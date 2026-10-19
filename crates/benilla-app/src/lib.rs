@@ -58,6 +58,8 @@ mod dynamic_interior;
 mod volumetric_fog;
 // GFX (volumetric light): shadow-mapped sun/moon light shafts.
 mod volumetric_light;
+// iNilla (cloud sea): ray-marched volumetric clouds for the custom maps that declare one.
+mod cloud_sea;
 // MONKEY (p0 graphics programme): the programme's cvar bridges (skyDither, ...).
 mod monkey_gfx;
 // MONKEY (post): optional world-only HDR post-processing.

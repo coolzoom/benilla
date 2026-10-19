@@ -3,7 +3,8 @@
 # zone name from its own Lua, takes in-world screenshots, exits; client_check.py gives the verdict.
 #   patch/tests/client/run_client_test.sh [scene]
 # Env: TEST_USER / TEST_PASS / TEST_CHAR (provisioned by tests/test_e2e.py; never a player's account),
-#      WOW_HOST (127.0.0.1:3735), BENILLA_BIN (target/play/benilla), CLIENT_SECS (run length, 120).
+#      WOW_HOST (127.0.0.1:3735), BENILLA_BIN (target/play/benilla), CLIENT_SECS (run length, 120),
+#      TEST_CAM (WOW_PROBE_CAM poses, "yaw,pitch,dist@s;..."; two default poses in the last 32 s).
 # Timeline: the first world load (Northshire) settles by ~35 s, then `.gm on`, `.tele` at 47 s, `.gps` at 59/71 s;
 # the camera poses and the screenshot burst fill the last 30 s.
 set -euo pipefail
@@ -47,7 +48,7 @@ echo "==> benilla ($BIN) -> $OUT"
         WOW_PROBE_CHAT=".gm on;.tele $TELE;.gps;.gps" WOW_PROBE_CHAT_AT=35 WOW_PROBE_CHAT_EVERY=12 \
         WOW_PROBE_LUA='ProbeLog("TGZONE=" .. tostring(GetRealZoneText()) .. ";")' WOW_PROBE_LUA_AT=12 \
         WOW_PROBE_LUA_AGAIN=12 \
-        WOW_PROBE_CAM="30,8,14@$((SECS - 32));210,8,14@$((SECS - 19))" \
+        WOW_PROBE_CAM="${TEST_CAM:-30,8,14@$((SECS - 32));210,8,14@$((SECS - 19))}" \
         WOW_LIVE_SHOT="$OUT/shot.png" WOW_LIVE_SHOT_AT=$((SECS - 30)) WOW_LIVE_SHOT_COUNT=4 WOW_LIVE_SHOT_EVERY=6 \
         WOW_PROBE_EXIT_AT="$SECS" \
         "$BIN" > "$LOG" 2>&1 || echo "benilla exited with $?"

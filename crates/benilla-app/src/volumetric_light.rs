@@ -355,7 +355,7 @@ struct VolLightTextures {
 struct VolLightUniform(UniformBuffer<VolLightView>);
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct VolLightLabel;
+pub(crate) struct VolLightLabel; // iNilla: pub(crate), the cloud sea orders itself before it
 
 fn depth_entry(multisampled: bool) -> BindGroupLayoutEntryBuilder {
     if multisampled {

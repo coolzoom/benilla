@@ -119,7 +119,8 @@ class Group:
         cur_mat, remap, b_start, v_start = None, {}, 0, 0
         for fi in order:
             a, b, c, mat, flags = m.faces[fi]
-            if mat != cur_mat:
+            # MOBA's index count is a u16: a batch that would pass it starts afresh.
+            if mat != cur_mat or len(idx) - b_start + 3 > 65535:
                 if cur_mat is not None:
                     batches.append((b_start, len(idx) - b_start, v_start, len(pos) - 1, cur_mat))
                 cur_mat, remap, b_start, v_start = mat, {}, len(idx), len(pos)
