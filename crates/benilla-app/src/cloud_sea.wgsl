@@ -39,6 +39,12 @@ fn ray_distance(world_from_clip: mat4x4<f32>, eye: vec3<f32>, ndc_xy: vec2<f32>,
     return min(length(q.xyz / q.w - eye), cap);
 }
 
+// iNilla: both passes reconstruct the same centred reduced-resolution ray, including
+// the partial final tile. The depth texel is the nearest full-resolution guide.
+fn march_pixel(p: vec2<i32>, scale: f32, dims: vec2<i32>) -> vec2<f32> {
+    return min((vec2<f32>(p) + 0.5) * scale, vec2<f32>(dims) - 0.5);
+}
+
 #ifdef CS_MARCH
 
 #import bevy_render::view::View
@@ -129,7 +135,7 @@ fn shape(p: vec3<f32>) -> Shape {
         let rising = p - vec3<f32>(0.0, 0.0, cs.wind.z * t);
         let r = tw.w * (1.0 - 0.45 * h) * (0.7 + 0.6 * fbm(rising * 0.009 + vec3<f32>(fi * 7.1), 2u));
         let dxy = length(p.xy - tw.xy - sway);
-        let d = smoothstep(r, r * 0.3, dxy) * (1.0 - smoothstep(0.82, 1.1, h));
+        let d = (1.0 - smoothstep(r * 0.3, r, dxy)) * (1.0 - smoothstep(0.82, 1.1, h));
         if (d > best.d) {
             best = Shape(d, rising);
         }
@@ -151,7 +157,7 @@ fn shape(p: vec3<f32>) -> Shape {
         let strand = u * turns - dir * (ang - spin) / 6.2831853;
         let dz = (b.y - b.x) / turns * abs(fract(strand + 0.5) - 0.5);
         let taper = smoothstep(-0.05, 0.15, u) * (1.0 - smoothstep(0.85, 1.05, u));
-        var d = smoothstep(1.0, 0.2, length(vec2<f32>(rho - a.z, dz)) / a.w) * taper;
+        var d = (1.0 - smoothstep(0.2, 1.0, length(vec2<f32>(rho - a.z, dz)) / a.w)) * taper;
         if (b.w < 50.0) {
             d *= 1.0 - smoothstep(0.2, 0.55, cos(ang - b.w));
         }
@@ -168,25 +174,31 @@ fn remap(x: f32, lo: f32) -> f32 {
     return clamp((x - lo) / max(1.0 - lo, 0.05), 0.0, 1.0);
 }
 
-// The large form eroded twice: billows (~40 yd lobes, puffy because the noise is folded) carve the
-// silhouette into cauliflower heads, then fine detail frays the edges into wisps.
-fn density(s: Shape) -> f32 {
+// iNilla: erosion alone maps a solid interior straight back to one. Multiply by
+// a correlated low-frequency body field as well, so dense interiors retain structure.
+// Shared with the light march: empty billows must not cast solid-form shadows.
+fn body_density(s: Shape) -> f32 {
     if (s.d <= 0.002) {
         return 0.0;
     }
-    let lobes = 1.0 - abs(fbm(s.q * 0.011, 3u) * 2.0 - 1.0);
-    let body = remap(min(s.d * 1.35, 1.0), (1.0 - lobes) * 0.85);
+    let lobes = 1.0 - abs(fbm(s.q * 0.011, 2u) * 2.0 - 1.0);
+    let body = remap(s.d, 0.12 + (1.0 - lobes) * 0.65);
+    return body * mix(0.32, 1.0, lobes * lobes);
+}
+
+fn density(s: Shape) -> f32 {
+    let body = body_density(s);
     if (body <= 0.0) {
         return 0.0;
     }
     // The fine detail also evolves in place, so the billows boil as well as drift.
-    let fine = fbm(s.q * 0.045 + vec3<f32>(0.0, 0.0, cs.sun.w * 0.12), 3u);
+    let fine = fbm(s.q * 0.045 + vec3<f32>(0.0, 0.0, cs.sun.w * 0.12), 2u);
     return remap(body, fine * 0.45 * (1.0 - body * 0.6));
 }
 
-// Coverage toward the sun for the self-shadow: the large forms alone.
+// Omit only the finest erosion in the three-sample light march.
 fn shadow_density(p: vec3<f32>) -> f32 {
-    return min(shape(p).d * 1.2, 1.0);
+    return body_density(shape(p));
 }
 
 fn hg(mu: f32, g: f32) -> f32 {
@@ -198,9 +210,10 @@ fn hg(mu: f32, g: f32) -> f32 {
 fn fs_march(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let dims = vec2<i32>(textureDimensions(depth));
     let hp = vec2<i32>(in.position.xy);
-    let full = min(hp * i32(cs.counts.z), dims - vec2<i32>(1));
+    let centre = march_pixel(hp, cs.counts.z, dims);
+    let full = vec2<i32>(centre);
     let z = textureLoad(depth, full, 0);
-    let uv = (vec2<f32>(full) + 0.5) / vec2<f32>(dims);
+    let uv = centre / vec2<f32>(dims);
     let ndc = uv * vec2(2.0, -2.0) + vec2(-1.0, 1.0);
     let far = view.world_from_clip * vec4<f32>(ndc, max(z, 0.000001), 1.0);
     let ray_b = normalize(far.xyz / far.w - view.world_position);
@@ -231,11 +244,15 @@ fn fs_march(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let shade_rgb = cs.ambient.rgb * vec3<f32>(0.92, 0.98, 1.08);
     var tr = 1.0;
     var col = vec3<f32>(0.0);
-    var t = t0 + ign(vec2<f32>(hp)) * clamp(t0 * 0.03, 2.0, 60.0);
+    // iNilla: fixed coverage partitions the whole clipped segment. Jitter stays
+    // inside each interval, so every ray integrates exactly the same length.
+    let step_length = (t1 - t0) / max(f32(steps), 1.0);
+    let jitter = ign(vec2<f32>(hp));
     for (var i = 0u; i < 192u; i += 1u) {
-        if (i >= steps || t >= t1 || tr < 0.015) { break; }
+        if (i >= steps || tr < 0.015) { break; }
+        let t = t0 + (f32(i) + jitter) * step_length;
         let p = o + d * t;
-        var dt = clamp(t * 0.032, 2.0, 45.0);
+        let dt = step_length;
         let s = shape(p);
         let dens = density(s);
         if (dens > 0.0) {
@@ -247,8 +264,9 @@ fn fs_march(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
                 reach *= 3.2;
             }
             let beer = exp(-depth_to_sun * sigma);
-            // Multiple scattering keeps deep shadow from going black (a second, softer octave).
-            let sun_t = max(beer, exp(-depth_to_sun * sigma * 0.25) * 0.3);
+            // Bounded two-lobe approximation: direct Beer transmission plus a
+            // softer, energy-limited multiple-scatter contribution.
+            let sun_t = clamp(beer + (1.0 - beer) * exp(-depth_to_sun * sigma * 0.25) * 0.3, 0.0, 1.0);
             // Powder: the sunlit rims of thin, dense-edged billows read brighter than the core.
             let powder = 1.0 - exp(-dens * 3.0);
             let height = clamp((p.z - cs.slab.x) / (cs.slab.y - cs.slab.x + 120.0), 0.0, 1.0);
@@ -259,10 +277,6 @@ fn fs_march(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
             let alpha = 1.0 - exp(-dens * sigma * dt);
             col += tr * alpha * c;
             tr *= 1.0 - alpha;
-        } else if (s.d <= 0.002) {
-            dt *= 1.8;
-        }
-        t += dt;
     }
     // A downward ray that reached the march cap still has sea under it: the horizon haze.
     if (dist >= cs.slab.w && d.z < 0.0) {
@@ -299,6 +313,11 @@ fn key_at(p: vec2<i32>, dims: vec2<i32>) -> f32 {
     return ray_distance(view.world_from_clip, view.world_position, ndc, z, cs.slab.w);
 }
 
+fn key_at_reduced(p: vec2<i32>, dims: vec2<i32>, scale: f32) -> f32 {
+    let q = vec2<i32>(march_pixel(p, scale, dims));
+    return key_at(q, dims);
+}
+
 @fragment
 fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let p = vec2<i32>(in.position.xy);
@@ -309,6 +328,8 @@ fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // the full-resolution pixel the march read for it.
     let half_dims = vec2<i32>(textureDimensions(clouds));
     let scale = cs.counts.z;
+    // Centres, rather than corners, are shared with fs_march. This also behaves
+    // correctly when the full extent is not an exact multiple of the divisor.
     let h = (vec2<f32>(p) + 0.5) / scale - 0.5;
     let base = vec2<i32>(floor(h));
     let f = h - floor(h);
@@ -319,12 +340,16 @@ fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         for (var i = 0; i <= 1; i += 1) {
             let q = clamp(base + vec2<i32>(i, j), vec2<i32>(0), half_dims - vec2<i32>(1));
             let bilinear = select(1.0 - f.x, f.x, i == 1) * select(1.0 - f.y, f.y, j == 1);
-            let w = bilinear * exp(-abs(key_at(q * i32(scale), dims) - key) / tolerance) + 1e-4;
+            let guide = key_at_reduced(q, dims, scale);
+            let compatible = abs(guide - key) <= tolerance;
+            let w = select(0.0, bilinear * exp(-abs(guide - key) / tolerance), compatible);
             sum += textureLoad(clouds, q, 0) * w;
             weight += w;
         }
     }
-    let c = sum / weight;
+    // iNilla: incompatible depth guides contribute exactly zero; a fully rejected
+    // footprint leaves the scene untouched rather than adding an epsilon leak.
+    let c = select(vec4<f32>(0.0), sum / max(weight, 0.0001), weight > 0.0001);
     if (cs.lane.w > 0.5) {
         return vec4<f32>(c.rgb, source.a);
     }
