@@ -571,7 +571,12 @@ impl ViewNode for CloudSeaNode {
         let diagnostics = context.diagnostic_recorder();
         let stages: [(&str, &TextureView, &RenderPipeline, &BindGroup); 2] = [
             ("cloud_sea_march", &half.0.default_view, march, &march_bind),
-            ("cloud_sea_composite", out.destination, composite, &composite_bind),
+            (
+                "cloud_sea_composite",
+                out.destination,
+                composite,
+                &composite_bind,
+            ),
         ];
         for (label, destination, pipeline, bind) in stages {
             let mut pass = context

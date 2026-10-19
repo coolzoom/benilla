@@ -14,6 +14,37 @@ cargo play                              # builds and runs the optimized client
 
 The first build takes several minutes. `cargo play` is short for `cargo run --profile play -p benilla`.
 
+### One-click development and tests
+
+On macOS or Linux, use the repository script instead of remembering the Cargo flags:
+
+```sh
+./dev.sh 1          # first run: toolchain, WoW data and server settings
+./dev.sh 2          # build the playable client
+./dev.sh 3          # run target/play/benilla
+./dev.sh test       # changed-crate fmt, clippy and tests
+make test           # reproducible offline workspace test (no WoW data)
+./dev.sh gates      # complete land gates; may need data and a display
+```
+
+`make test` uses the pinned `Cargo.lock`, sets `CARGO_NET_OFFLINE=true`, and sets `WOW_DATA=` so
+the test run never reads a local game install. It runs the engine-free iNilla core/platform unit
+tests, which are suitable for a clean Linux or macOS machine without a display. It requires the
+Rust dependencies to have been cached once; a fresh checkout can prime them with `cargo fetch
+--locked`. `./dev.sh test` is the faster daily command: it scopes checks to the changed crates and
+their reverse dependents.
+
+For a clean Linux build, use the included Dockerfile:
+
+```sh
+docker build -t benilla-test .
+docker run --rm benilla-test
+```
+
+The container runs the same `make test` target. A deployable client build is `./dev.sh 2`, which
+produces `target/play/benilla`; the game data remains external and is never copied into the image
+or repository.
+
 Upstream benilla tracks the 1.12.1 client exactly, so changes that go beyond it are scattered across forks. This fork tries to bring them together in one place: work from other forks (credited in each section below) and its own, in four areas:
 
 1. **[Turtle WoW support](#turtle-wow-support)**: log in, create characters and play on Turtle WoW servers.

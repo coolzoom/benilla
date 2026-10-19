@@ -6,6 +6,9 @@
 #   ./dev.sh check  cargo check --profile play -p benilla (no link)
 #   ./dev.sh 2      cargo build --profile play -p benilla
 #   ./dev.sh 3      run target/play/benilla
+#   ./dev.sh test   run the scoped automatic test suite
+#   ./dev.sh gates  run the complete land-gate chain
+#   ./dev.sh offline run workspace tests without network or WoW data
 #   ./dev.sh trim   drop host release/ship and stale incremental caches
 #
 # Local paths and login are written to .benilla.local (gitignored) and exported
@@ -313,6 +316,29 @@ check_client() {
     cargo check --profile play -p benilla || return 1
 }
 
+test_client() {
+    echo "== 自动测试（按变更范围） =="
+    require_rust || return 1
+    echo "scripts/check.sh"
+    "$root/scripts/check.sh"
+}
+
+gates_client() {
+    echo "== 完整门禁测试 =="
+    require_rust || return 1
+    echo "scripts/gates.sh"
+    "$root/scripts/gates.sh"
+}
+
+offline_test() {
+    echo "== 离线自动测试（无 WoW 数据） =="
+    require_rust || return 1
+    echo "cargo fmt --all -- --check"
+    cargo fmt --all -- --check || return 1
+    echo "CARGO_NET_OFFLINE=true WOW_DATA= cargo test --locked -p inilla-core -p inilla-platform"
+    CARGO_NET_OFFLINE=true WOW_DATA= cargo test --locked -p inilla-core -p inilla-platform
+}
+
 trim_cache() {
     echo "== 清理用不到的编译产物 =="
     local before after sub
@@ -357,11 +383,14 @@ run_client() {
 }
 
 usage() {
-    echo "用法: ./dev.sh [1|2|3|check|trim]"
+    echo "用法: ./dev.sh [1|2|3|check|test|gates|offline|trim]"
     echo "  1      配置环境"
     echo "  2      编译（play，要运行时用）"
     echo "  3      运行"
     echo "  check  只检查编译错误，不链接"
+    echo "  test   按变更范围运行 fmt、clippy 和测试"
+    echo "  gates  运行完整门禁（可能需要游戏数据和显示器）"
+    echo "  offline 在无网络、无 WoW 数据模式运行 workspace 测试"
     echo "  trim   删掉 host 的 release/ship，以及不会再复用的增量缓存"
 }
 
@@ -372,18 +401,24 @@ menu() {
     echo "  2) 编译"
     echo "  3) 运行"
     echo "  4) 只检查编译错误"
-    echo "  5) 清理 release 和过期缓存"
+    echo "  5) 按变更范围自动测试"
+    echo "  6) 完整门禁测试"
+    echo "  7) 离线自动测试"
+    echo "  8) 清理 release 和过期缓存"
     echo "  q) 退出"
-    printf '选择 [1/2/3/4/5/q]: '
+    printf '选择 [1/2/3/4/5/6/7/8/q]: '
     read -r choice || exit 0
     case "$choice" in
     1) configure || true ;;
     2) build_client || true ;;
     3) run_client || true ;;
     4) check_client || true ;;
-    5) trim_cache || true ;;
+    5) test_client || true ;;
+    6) gates_client || true ;;
+    7) offline_test || true ;;
+    8) trim_cache || true ;;
     q | Q) exit 0 ;;
-    *) echo "请输入 1、2、3、4、5 或 q。" ;;
+    *) echo "请输入 1、2、3、4、5、6、7、8 或 q。" ;;
     esac
 }
 
@@ -393,6 +428,10 @@ case "${1:-}" in
 3) run_client ;;
 4 | check) check_client ;;
 5 | trim) trim_cache ;;
+test) test_client ;;
+6 | gates) gates_client ;;
+7 | offline | test-offline) offline_test ;;
+8) trim_cache ;;
 -h | --help) usage ;;
 "")
     while true; do
