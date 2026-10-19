@@ -277,6 +277,7 @@ fn fs_march(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
             let alpha = 1.0 - exp(-dens * sigma * dt);
             col += tr * alpha * c;
             tr *= 1.0 - alpha;
+        }
     }
     // A downward ray that reached the march cap still has sea under it: the horizon haze.
     if (dist >= cs.slab.w && d.z < 0.0) {
@@ -336,20 +337,35 @@ fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let tolerance = 0.05 * key + 1.0;
     var sum = vec4<f32>(0.0);
     var weight = 0.0;
+    var nearest = vec4<f32>(0.0);
+    var nearest_delta = 1e30;
     for (var j = 0; j <= 1; j += 1) {
         for (var i = 0; i <= 1; i += 1) {
             let q = clamp(base + vec2<i32>(i, j), vec2<i32>(0), half_dims - vec2<i32>(1));
             let bilinear = select(1.0 - f.x, f.x, i == 1) * select(1.0 - f.y, f.y, j == 1);
             let guide = key_at_reduced(q, dims, scale);
-            let compatible = abs(guide - key) <= tolerance;
-            let w = select(0.0, bilinear * exp(-abs(guide - key) / tolerance), compatible);
+            let delta = abs(guide - key);
+            if (delta < nearest_delta) {
+                nearest_delta = delta;
+                nearest = textureLoad(clouds, q, 0);
+            }
+            let compatible = delta <= tolerance;
+            var w = 0.0;
+            if (compatible) {
+                w = bilinear * exp(-abs(guide - key) / tolerance);
+            }
             sum += textureLoad(clouds, q, 0) * w;
             weight += w;
         }
     }
     // iNilla: incompatible depth guides contribute exactly zero; a fully rejected
     // footprint leaves the scene untouched rather than adding an epsilon leak.
-    let c = select(vec4<f32>(0.0), sum / max(weight, 0.0001), weight > 0.0001);
+    // iNilla: a reduced ray can straddle a bridge edge; keep its nearest cloud
+    // sample instead of erasing the whole footprint when all four guides reject.
+    var c = nearest;
+    if (weight > 0.0001) {
+        c = sum / weight;
+    }
     if (cs.lane.w > 0.5) {
         return vec4<f32>(c.rgb, source.a);
     }
